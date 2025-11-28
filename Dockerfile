@@ -16,10 +16,10 @@ COPY src/ src/
 RUN pip install --no-cache-dir -e .
 
 # Create config directory
-RUN mkdir -p /root/.claude-clone
+RUN mkdir -p /root/.clio
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
 # Default command
-CMD ["claude-clone"]
+CMD ["clio"]

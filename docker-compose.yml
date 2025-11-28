@@ -1,15 +1,15 @@
 version: '3.8'
 
 services:
-  claude-clone:
+  clio:
     build: .
-    image: claude-clone:latest
-    container_name: claude-clone
+    image: clio:latest
+    container_name: clio
     stdin_open: true
     tty: true
     volumes:
       # Mount config directory to persist configuration
-      - ./config:/root/.claude-clone
+      - ./config:/root/.clio
       # Mount current directory for file operations
       - ./workspace:/workspace
     working_dir: /workspace

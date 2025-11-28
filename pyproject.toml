@@ -1,10 +1,10 @@
 [project]
-name = "claude-clone"
+name = "clio"
 version = "0.1.0"
-description = "Self-hosted AI coding assistant with dynamic model switching"
+description = "CLIO - Command Line Interactive Operator - Self-hosted AI coding assistant"
 requires-python = ">=3.11"
 authors = [
-    {name = "Claude Clone Team"}
+    {name = "CLIO Team"}
 ]
 
 dependencies = [
@@ -28,7 +28,7 @@ anthropic = ["anthropic>=0.40"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "black", "ruff"]
 
 [project.scripts]
-claude-clone = "claude_clone.cli:main"
+clio = "clio.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -27,7 +27,7 @@ except ImportError:
 
 
 class ChatApp(App):
-    """Claude Clone chat application."""
+    """CLIO chat application."""
 
     CSS = """
     #chat-log {
@@ -271,7 +271,7 @@ class ChatApp(App):
             filename = args.strip()
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"claude-clone-chat-{timestamp}.md"
+            filename = f"clio-chat-{timestamp}.md"
 
         # Ensure .md extension
         if not filename.endswith(".md"):
@@ -279,7 +279,7 @@ class ChatApp(App):
 
         try:
             with open(filename, "w") as f:
-                f.write("# Claude Clone Chat Export\n\n")
+                f.write("# CLIO Chat Export\n\n")
                 f.write(f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                 f.write("---\n\n")
 
@@ -305,7 +305,7 @@ class ChatApp(App):
         """Handle mount."""
         chat_log = self.query_one("#chat-log", RichLog)
         chat_log.write(Panel(
-            "[bold cyan]Claude Clone[/bold cyan]\n\n"
+            "[bold cyan]CLIO[/bold cyan] - Command Line Interactive Operator\n\n"
             "A self-hosted AI coding assistant.\n\n"
             "Type [bold]/help[/bold] for commands or start chatting!",
             title="Welcome"

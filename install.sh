@@ -1,9 +1,9 @@
 #!/bin/bash
-# Installation script for claude-clone
+# Installation script for CLIO
 
 set -e
 
-echo "🚀 Installing Claude Clone..."
+echo "🚀 Installing CLIO - Command Line Interactive Operator..."
 
 # Check Python version
 if ! command -v python3.11 &> /dev/null; then
@@ -20,8 +20,8 @@ pip install -e .
 
 echo "✓ Installation complete!"
 echo ""
-echo "Run 'claude-clone' to start the application"
-echo "Run 'claude-clone setup' to configure providers"
+echo "Run 'clio' to start the application"
+echo "Run 'clio setup' to configure providers"
 echo ""
 echo "For Docker deployment:"
 echo "  1. Run './mimic' to start in Docker"

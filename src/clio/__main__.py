@@ -1,4 +1,4 @@
-"""Allow running as python -m claude_clone."""
+"""Allow running as python -m clio."""
 from .cli import main
 
 if __name__ == "__main__":

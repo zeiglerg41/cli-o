@@ -28,12 +28,12 @@ def setup():
     config_manager = ConfigManager()
     config = config_manager.load()
     
-    click.echo("🚀 Claude Clone Setup")
+    click.echo("🚀 CLIO Setup")
     click.echo(f"\nConfiguration file: {config_manager.config_path}")
     click.echo("\nCurrent configuration:")
     click.echo(f"  Provider: {config.defaults.provider}")
     click.echo(f"  Model: {config.defaults.model}")
-    click.echo("\nSetup complete! Run 'claude-clone' to start.")
+    click.echo("\nSetup complete! Run 'clio' to start.")
 
 
 @main.command()

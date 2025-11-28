@@ -1,11 +1,11 @@
 #!/bin/bash
-# Wrapper script to run claude-clone in Docker
+# Wrapper script to run CLIO in Docker
 
 # Build image if it doesn't exist
-if [[ "$(docker images -q claude-clone:latest 2> /dev/null)" == "" ]]; then
-    echo "Building claude-clone image..."
+if [[ "$(docker images -q clio:latest 2> /dev/null)" == "" ]]; then
+    echo "Building CLIO image..."
     docker-compose build
 fi
 
 # Run the container
-docker-compose run --rm claude-clone "$@"
+docker-compose run --rm clio "$@"

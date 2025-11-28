@@ -6,15 +6,15 @@ import asyncio
 def test_imports():
     """Test that all modules can be imported."""
     print("Testing imports...")
-    
+
     try:
-        from claude_clone.config.manager import ConfigManager
-        from claude_clone.config.schema import Config, ProviderConfig
-        from claude_clone.providers import create_provider
-        from claude_clone.context.manager import ContextManager
-        from claude_clone.agent.tools import Tools
-        from claude_clone.agent.core import Agent
-        from claude_clone.commands.router import CommandRouter
+        from clio.config.manager import ConfigManager
+        from clio.config.schema import Config, ProviderConfig
+        from clio.providers import create_provider
+        from clio.context.manager import ContextManager
+        from clio.agent.tools import Tools
+        from clio.agent.core import Agent
+        from clio.commands.router import CommandRouter
         print("✓ All imports successful")
         return True
     except Exception as e:
@@ -27,7 +27,7 @@ def test_config():
     print("\nTesting configuration...")
     
     try:
-        from claude_clone.config.manager import ConfigManager
+        from clio.config.manager import ConfigManager
         
         config_manager = ConfigManager()
         config = config_manager.load()
@@ -48,7 +48,7 @@ def test_context_manager():
     print("\nTesting context manager...")
     
     try:
-        from claude_clone.context.manager import ContextManager
+        from clio.context.manager import ContextManager
         
         cm = ContextManager()
         
@@ -68,7 +68,7 @@ def test_tools():
     print("\nTesting tools...")
     
     try:
-        from claude_clone.agent.tools import Tools
+        from clio.agent.tools import Tools
         
         tools = Tools()
         tool_defs = tools.get_tool_definitions()
@@ -88,7 +88,7 @@ def test_command_router():
     print("\nTesting command router...")
     
     try:
-        from claude_clone.commands.router import CommandRouter
+        from clio.commands.router import CommandRouter
         
         router = CommandRouter()
         
@@ -121,7 +121,7 @@ async def test_file_operations():
     print("\nTesting file operations...")
     
     try:
-        from claude_clone.agent.tools import Tools
+        from clio.agent.tools import Tools
         import tempfile
         import os
         
@@ -158,7 +158,7 @@ async def test_file_operations():
 def main():
     """Run all tests."""
     print("=" * 60)
-    print("Claude Clone - Basic Functionality Tests")
+    print("CLIO - Basic Functionality Tests")
     print("=" * 60)
     
     results = []
