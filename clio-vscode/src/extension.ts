@@ -33,6 +33,19 @@ export function activate(context: vscode.ExtensionContext) {
     codeLensProvider
   );
 
+  // Register accept command
+  const acceptDiffCommand = vscode.commands.registerCommand(
+    'clio.acceptDiff',
+    async (filePath: string) => {
+      const success = await diffDecorator.clearDiff(filePath);
+      if (success) {
+        bridgeServer.notifyDiffAccepted(filePath);
+        codeLensProvider.refresh();
+        vscode.window.showInformationMessage('Changes accepted');
+      }
+    }
+  );
+
   // Register undo command
   const undoDiffCommand = vscode.commands.registerCommand(
     'clio.undoDiff',
@@ -51,6 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
     { dispose: () => bridgeServer.stop() },
     { dispose: () => diffDecorator.dispose() },
     codeLensDisposable,
+    acceptDiffCommand,
     undoDiffCommand
   );
 

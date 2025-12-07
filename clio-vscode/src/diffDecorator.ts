@@ -40,18 +40,24 @@ export class DiffDecorator {
     async showDiff(file: string, edits: DiffEdit[], description: string): Promise<void> {
         const uri = vscode.Uri.file(file);
 
-        // Open the file
+        // Force reload from disk to ensure we have the latest content
         const document = await vscode.workspace.openTextDocument(uri);
+
+        // If document is dirty (has unsaved changes), we need to reload it
+        // This ensures the file content matches what's on disk
+        if (document.isDirty) {
+            await vscode.commands.executeCommand('workbench.action.files.revert');
+        }
+
         const editor = await vscode.window.showTextDocument(document);
 
         const decorations: vscode.DecorationOptions[] = [];
 
         // Highlight each changed line with tooltip showing old text
         for (const edit of edits) {
-            const lineRange = new vscode.Range(
-                new vscode.Position(edit.range.start.line, 0),
-                new vscode.Position(edit.range.start.line, Number.MAX_SAFE_INTEGER)
-            );
+            console.log(`[DiffDecorator] Received edit range: start.line=${edit.range.start.line}, end.line=${edit.range.end.line}`);
+            console.log(`[DiffDecorator] Old text: ${edit.oldText.substring(0, 50)}...`);
+            console.log(`[DiffDecorator] New text: ${edit.newText.substring(0, 50)}...`);
 
             // Create hover message showing old text
             const hoverMessage = new vscode.MarkdownString();
@@ -59,10 +65,18 @@ export class DiffDecorator {
             hoverMessage.appendMarkdown(`**Previous text:**\n\`\`\`\n${edit.oldText}\n\`\`\`\n\n`);
             hoverMessage.appendMarkdown(`**New text:**\n\`\`\`\n${edit.newText}\n\`\`\``);
 
-            decorations.push({
-                range: lineRange,
-                hoverMessage: hoverMessage,
-            });
+            // Create separate decoration for EACH line (required for isWholeLine to work)
+            for (let lineNum = edit.range.start.line; lineNum <= edit.range.end.line; lineNum++) {
+                const lineRange = new vscode.Range(
+                    new vscode.Position(lineNum, 0),
+                    new vscode.Position(lineNum, Number.MAX_SAFE_INTEGER)
+                );
+
+                decorations.push({
+                    range: lineRange,
+                    hoverMessage: hoverMessage,
+                });
+            }
         }
 
         // Apply decorations

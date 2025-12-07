@@ -139,13 +139,43 @@ class Tools:
                 async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                     await f.write(new_content)
 
-                # Then send proposeDiff to show decorations
+                # Wait a moment for the file watcher to detect the change
+                import asyncio
+                await asyncio.sleep(0.1)
+
+                # Use the ORIGINAL position (lines_before from old_text) since the edit
+                # happens at the same line location. The line numbers don't shift for
+                # single-line replacements.
+                newline_count = new_text.count('\n')
+
+                # Calculate end line and character
+                if '\n' in new_text:
+                    # Multi-line: end line is start + number of newlines
+                    # End character is the position after the last newline
+                    last_line_start = new_text.rfind('\n') + 1
+                    end_char_new = len(new_text) - last_line_start
+                    end_line = lines_before + newline_count
+                else:
+                    # Single line: end is on the same line
+                    end_char_new = char_in_line + len(new_text)
+                    end_line = lines_before
+
+                # Debug
+                with open("/tmp/clio_lines.txt", "w") as f:
+                    f.write(f"old_text: {repr(old_text[:100])}\n")
+                    f.write(f"new_text: {repr(new_text[:100])}\n")
+                    f.write(f"lines_before: {lines_before}\n")
+                    f.write(f"newline_count: {newline_count}\n")
+                    f.write(f"end_line: {end_line}\n")
+                    f.write(f"Will highlight lines {lines_before} to {end_line}\n")
+
+                # Send proposeDiff with ORIGINAL line numbers (where old_text was)
                 await bridge.propose_diff(
                     file_path=str(file_path),
                     edits=[{
                         "range": {
                             "start": {"line": lines_before, "character": max(0, char_in_line)},
-                            "end": {"line": lines_before + lines_in_old, "character": end_char}
+                            "end": {"line": end_line, "character": end_char_new}
                         },
                         "oldText": old_text,
                         "newText": new_text

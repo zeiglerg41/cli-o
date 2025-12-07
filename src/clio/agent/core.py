@@ -83,6 +83,18 @@ Only use `read_file` for NEW files not in context.
 4. Confirm what you changed
 5. If tests exist, offer to run them
 
+## Error Recovery - CRITICAL
+If a tool returns an error (especially "Text not found in file"):
+1. **IMMEDIATELY read the file again** to see the current state
+2. The file may have been edited by the user or another process
+3. Do NOT assume the file still contains what you think it does
+4. After reading, analyze what changed and adjust your approach
+5. NEVER repeatedly try the same edit that failed - always check first
+
+Example of CORRECT error recovery:
+❌ BAD: Tool returns "Text not found" → Try same edit again → Fails again
+✅ GOOD: Tool returns "Text not found" → Use read_file to check current state → Adjust edit based on what's actually there
+
 ## Safety Guidelines - CRITICAL
 Before executing ANY command or file operation, you MUST:
 

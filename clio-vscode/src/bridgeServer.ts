@@ -163,6 +163,7 @@ export class BridgeServer {
       const { file, edits, description } = message;
 
       console.log(`[Clio Bridge] Proposing diff for ${file}:`, description);
+      console.log(`[Clio Bridge] Received ${edits.length} edits:`, JSON.stringify(edits, null, 2));
 
       // Show inline diff decorations
       await this.diffDecorator.showDiff(file, edits, description);

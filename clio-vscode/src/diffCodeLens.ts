@@ -36,6 +36,15 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
                 0
             );
 
+            // Accept button
+            const acceptLens = new vscode.CodeLens(range, {
+                title: '✓ Accept',
+                tooltip: `Accept changes: ${pendingDiff.description}`,
+                command: 'clio.acceptDiff',
+                arguments: [filePath],
+            });
+            codeLenses.push(acceptLens);
+
             // Undo button
             const undoLens = new vscode.CodeLens(range, {
                 title: '↶ Undo',
