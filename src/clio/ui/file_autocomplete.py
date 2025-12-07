@@ -10,7 +10,48 @@ class FileAutoComplete(AutoComplete):
 
     def __init__(self, target, working_dir: Path, **kwargs):
         self.working_dir = working_dir
+        self._file_cache = None  # Cache for file list
         super().__init__(target, candidates=None, **kwargs)
+
+    def _get_all_files(self) -> list[tuple[str, str]]:
+        """Get cached list of all files in workspace."""
+        if self._file_cache is not None:
+            return self._file_cache
+
+        files = []
+        # Limit search depth and file count to prevent lag
+        count = 0
+        max_files = 500
+
+        for file_path in self.working_dir.rglob('*'):
+            if count >= max_files:
+                break
+
+            # Skip hidden files and common ignore patterns
+            if any(part.startswith('.') for part in file_path.parts):
+                continue
+            if any(part in ['node_modules', '__pycache__', 'venv', '.git'] for part in file_path.parts):
+                continue
+
+            if not file_path.is_file():
+                continue
+
+            try:
+                rel_path = str(file_path.relative_to(self.working_dir))
+                filename = file_path.name
+                files.append((rel_path, filename))
+                count += 1
+            except ValueError:
+                continue
+
+        self._file_cache = files
+
+        with open("/tmp/clio_debug.log", "a") as f:
+            f.write(f"[CACHE] Built cache with {len(files)} files\n")
+            calc_files = [f for f in files if 'calc' in f[1].lower()]
+            f.write(f"[CACHE] Files with 'calc': {calc_files}\n")
+
+        return files
 
     def _find_at_position(self, state: TargetState) -> int:
         """Find the position of @ before cursor, or -1 if not found."""
@@ -46,6 +87,13 @@ class FileAutoComplete(AutoComplete):
 
         return after_at
 
+    def get_matches(self, target_state, candidates, search_string):
+        """Override to skip default fuzzy matching - we already filtered in get_candidates."""
+        # We already did the filtering/matching in get_candidates(), so just return them as-is
+        with open("/tmp/clio_debug.log", "a") as f:
+            f.write(f"get_matches: candidates={len(candidates)}, search='{search_string}'\n")
+        return candidates
+
     def should_show_dropdown(self, search_string: str) -> bool:
         """Override to show dropdown when @ is typed, even with empty search."""
         # Check if there's an @ in the current input
@@ -65,71 +113,104 @@ class FileAutoComplete(AutoComplete):
         return True
 
     def get_candidates(self, state: TargetState) -> list[DropdownItem]:
-        """Get file candidates for autocomplete, supporting nested directories."""
+        """Get file candidates - directory navigation OR fuzzy search."""
         # Check if @ is present
         last_at = self._find_at_position(state)
+
+        with open("/tmp/clio_debug.log", "a") as f:
+            f.write(f"get_cand: @pos={last_at}\n")
+
         if last_at == -1:
             return []
 
-        # Get the FULL path after @ directly from state (not from get_search_string)
-        # get_search_string only returns the part after last / for filtering
         text = state.text
         cursor = state.cursor_position
         full_path = text[last_at + 1:cursor]
 
+        with open("/tmp/clio_debug.log", "a") as f:
+            f.write(f"  search_term='{full_path}'\n")
+
         try:
-            # Determine which directory to list and what to filter by
+            # Mode 1: Directory navigation (has / in path)
             if '/' in full_path:
-                # User is navigating into a directory
-                # Split into directory path and search term
                 last_slash = full_path.rfind('/')
                 dir_path = full_path[:last_slash]
                 search_term = full_path[last_slash + 1:]
 
-                # Resolve the directory relative to working_dir
                 current_dir = self.working_dir / dir_path
+
+                if not current_dir.exists() or not current_dir.is_dir():
+                    return []
+
+                items = []
+                for item in sorted(current_dir.iterdir()):
+                    name = item.name
+                    if name.startswith('.'):
+                        continue
+                    if search_term and not name.lower().startswith(search_term.lower()):
+                        continue
+
+                    if item.is_dir():
+                        items.append(DropdownItem(main=f"{name}/", prefix="📁"))
+                    else:
+                        items.append(DropdownItem(main=name, prefix="📄"))
+
+                return items[:15]
+
+            # Mode 2: Fuzzy search across all files (no / in path)
             else:
-                # No slash yet, listing from working_dir
-                current_dir = self.working_dir
                 search_term = full_path
 
-            with open("/tmp/clio_debug.log", "a") as f:
-                f.write(f"get_cand: path='{full_path}', dir={current_dir}, term='{search_term}'\n")
+                # If empty, show current directory contents + top files
+                if not search_term:
+                    items = []
+                    # Show directories and files in current dir
+                    for item in sorted(self.working_dir.iterdir())[:15]:
+                        if item.name.startswith('.'):
+                            continue
+                        if item.is_dir():
+                            items.append(DropdownItem(main=f"{item.name}/", prefix="📁"))
+                        else:
+                            items.append(DropdownItem(main=item.name, prefix="📄"))
 
-            # Check if directory exists
-            if not current_dir.exists() or not current_dir.is_dir():
+                    with open("/tmp/clio_debug.log", "a") as f:
+                        f.write(f"  returning {len(items)} (all)\n")
+
+                    return items
+
+                # Fuzzy search all files
+                all_files = self._get_all_files()
+                search_lower = search_term.lower()
+                matched = []
+
                 with open("/tmp/clio_debug.log", "a") as f:
-                    f.write(f"  DIR MISSING\n")
-                return []
+                    f.write(f"  cached files={len(all_files)}\n")
 
-            items = []
-            for item in sorted(current_dir.iterdir()):
-                name = item.name
+                for rel_path, filename in all_files:
+                    if search_lower in filename.lower():
+                        matched.append((0, DropdownItem(main=rel_path, prefix="📄")))
+                    elif search_lower in rel_path.lower():
+                        matched.append((1, DropdownItem(main=rel_path, prefix="📄")))
 
-                # Skip hidden files
-                if name.startswith('.'):
-                    continue
+                with open("/tmp/clio_debug.log", "a") as f:
+                    f.write(f"  matched={len(matched)}\n")
+                    if len(matched) > 0:
+                        f.write(f"  first match={matched[0][1].main}\n")
 
-                # Filter by search term (case-insensitive)
-                if search_term and not name.lower().startswith(search_term.lower()):
-                    continue
+                matched.sort(key=lambda x: (x[0], x[1].value.lower()))
 
-                # Create dropdown item
-                if item.is_dir():
-                    items.append(DropdownItem(main=f"{name}/", prefix="📁"))
-                else:
-                    items.append(DropdownItem(main=name, prefix="📄"))
+                with open("/tmp/clio_debug.log", "a") as f:
+                    f.write(f"  returning {len(matched[:15])} (fuzzy)\n")
 
-            with open("/tmp/clio_debug.log", "a") as f:
-                f.write(f"  FOUND {len(items)}\n")
-            return items[:15]  # Limit to 15
+                return [item[1] for item in matched[:15]]
+
         except Exception as e:
             with open("/tmp/clio_debug.log", "a") as f:
-                f.write(f"  ERROR: {e}\n")
+                f.write(f"  EXCEPTION: {e}\n")
             return []
 
     def apply_completion(self, value: str, state: TargetState) -> None:
-        """Apply completion by replacing text after @ with selected value."""
+        """Apply completion - preserve directory path for navigation, full path for fuzzy."""
         target = self.target
         text = state.text
         cursor = state.cursor_position
@@ -139,21 +220,17 @@ class FileAutoComplete(AutoComplete):
         if last_at == -1:
             return
 
-        # Get the full path after @, and preserve directory path
         full_path_after_at = text[last_at + 1:cursor]
 
-        # If we're in a nested directory, preserve the directory path
+        # If we're in directory navigation mode (has /), preserve dir path
         if '/' in full_path_after_at:
-            # Extract the directory path (everything before the last /)
             last_slash = full_path_after_at.rfind('/')
             dir_path = full_path_after_at[:last_slash + 1]
-            # Combine directory path with the selected value
             complete_path = dir_path + value
         else:
-            # No directory path, just use the value
+            # Fuzzy mode - value is already full path
             complete_path = value
 
-        # Replace everything from @ to cursor with @complete_path
         new_value = text[:last_at] + "@" + complete_path + text[cursor:]
         new_cursor_position = last_at + 1 + len(complete_path)
 
@@ -161,15 +238,11 @@ class FileAutoComplete(AutoComplete):
             target.value = new_value
             target.cursor_position = new_cursor_position
 
-        # CRITICAL: Rebuild options after completion (like base class does)
-        # This updates the dropdown to show contents of the new directory
-        new_target_state = self._get_target_state()
-        self._rebuild_options(
-            new_target_state, self.get_search_string(new_target_state)
-        )
-
-    def post_completion(self) -> None:
-        """Keep dropdown open if completed value is a directory (ends with /)."""
-        # If the completed path doesn't end with /, it's a file - hide dropdown
-        if not self.target.value.endswith("/"):
+        # If completed value is a directory (ends with /), keep dropdown open
+        if complete_path.endswith("/"):
+            new_target_state = self._get_target_state()
+            self._rebuild_options(
+                new_target_state, self.get_search_string(new_target_state)
+            )
+        else:
             self.action_hide()

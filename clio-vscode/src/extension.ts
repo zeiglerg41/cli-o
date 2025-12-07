@@ -5,6 +5,8 @@ import { EditApplier } from './editApplier';
 import { StatusBar } from './statusBar';
 import { ChatPanel } from './webview/chatPanel';
 import { BridgeServer } from './bridgeServer';
+import { DiffDecorator } from './diffDecorator';
+import { DiffCodeLensProvider } from './diffCodeLens';
 
 /**
  * Extension activation entry point
@@ -12,8 +14,11 @@ import { BridgeServer } from './bridgeServer';
 export function activate(context: vscode.ExtensionContext) {
   console.log('[Clio] Extension activated');
 
+  // Create diff decorator for inline diffs
+  const diffDecorator = new DiffDecorator();
+
   // Start WebSocket bridge server for terminal CLI
-  const bridgeServer = new BridgeServer();
+  const bridgeServer = new BridgeServer(diffDecorator);
   bridgeServer.start().then(() => {
     console.log('[Clio] Bridge server started');
   }).catch((error) => {
@@ -21,10 +26,33 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.showErrorMessage(`Clio: Failed to start IDE bridge: ${error}`);
   });
 
-  // Cleanup bridge server on deactivation
-  context.subscriptions.push({
-    dispose: () => bridgeServer.stop()
-  });
+  // Register CodeLens provider for accept/reject buttons
+  const codeLensProvider = new DiffCodeLensProvider(diffDecorator);
+  const codeLensDisposable = vscode.languages.registerCodeLensProvider(
+    { scheme: 'file' },
+    codeLensProvider
+  );
+
+  // Register undo command
+  const undoDiffCommand = vscode.commands.registerCommand(
+    'clio.undoDiff',
+    async (filePath: string) => {
+      const success = await diffDecorator.undoDiff(filePath);
+      if (success) {
+        bridgeServer.notifyDiffRejected(filePath);
+        codeLensProvider.refresh();
+        vscode.window.showInformationMessage('Changes reverted');
+      }
+    }
+  );
+
+  // Cleanup on deactivation
+  context.subscriptions.push(
+    { dispose: () => bridgeServer.stop() },
+    { dispose: () => diffDecorator.dispose() },
+    codeLensDisposable,
+    undoDiffCommand
+  );
 
   // Initialize core components
   const clioClient = new ClioClient();

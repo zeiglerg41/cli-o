@@ -48,8 +48,28 @@ Shows before/after diff in IDE without applying.
 }
 ```
 
-#### 3. Apply Diff
-Directly applies edit to open document.
+#### 3. Propose Diff
+Shows inline diff with accept/reject buttons (green added line above, red removed line below).
+```json
+{
+  "type": "proposeDiff",
+  "file": "/absolute/path/to/file.py",
+  "edits": [
+    {
+      "range": {
+        "start": { "line": 5, "character": 11 },
+        "end": { "line": 5, "character": 17 }
+      },
+      "oldText": "a * b",
+      "newText": "a + b"
+    }
+  ],
+  "description": "Fix add() to use addition operator"
+}
+```
+
+#### 4. Apply Diff (deprecated, use proposeDiff)
+Directly applies edit to open document without preview.
 ```json
 {
   "type": "applyDiff",
@@ -66,7 +86,7 @@ Directly applies edit to open document.
 }
 ```
 
-#### 4. Close Diff
+#### 5. Close Diff
 Closes diff view for a file.
 ```json
 {
@@ -75,7 +95,7 @@ Closes diff view for a file.
 }
 ```
 
-#### 5. Status Update
+#### 6. Status Update
 Updates status bar or notification.
 ```json
 {

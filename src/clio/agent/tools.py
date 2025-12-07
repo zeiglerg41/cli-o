@@ -130,21 +130,29 @@ class Tools:
                 )
                 return f"Successfully edited {path}"
 
-            # Check for IDE bridge
+            # Check for IDE bridge - propose diff with decorations
             bridge = get_bridge()
             if bridge.is_connected():
-                # Send diff to IDE
-                await bridge.apply_diff(
-                    file_path=path,
+                # First apply the edit to the file
+                new_content = content.replace(old_text, new_text, 1)
+                file_path = Path(path).resolve()
+                async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
+                    await f.write(new_content)
+
+                # Then send proposeDiff to show decorations
+                await bridge.propose_diff(
+                    file_path=str(file_path),
                     edits=[{
                         "range": {
                             "start": {"line": lines_before, "character": max(0, char_in_line)},
                             "end": {"line": lines_before + lines_in_old, "character": end_char}
                         },
+                        "oldText": old_text,
                         "newText": new_text
-                    }]
+                    }],
+                    description=f"Edit {Path(path).name}"
                 )
-                return f"Successfully edited {path}"
+                return f"Successfully edited {path} (hover over green highlight to see changes, click Undo to revert)"
 
             # Normal mode: write file
             new_content = content.replace(old_text, new_text, 1)

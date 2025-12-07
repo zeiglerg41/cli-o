@@ -114,8 +114,22 @@ class IDEBridge:
 
         return False
 
+    async def propose_diff(self, file_path: str, edits: list, description: str = "") -> bool:
+        """Propose diff with inline decorations and accept/reject buttons."""
+        if not self.connected:
+            return False
+
+        await self.send({
+            "type": "proposeDiff",
+            "file": str(Path(file_path).resolve()),
+            "edits": edits,
+            "description": description
+        })
+
+        return True
+
     async def apply_diff(self, file_path: str, edits: list) -> bool:
-        """Apply diff directly to IDE document."""
+        """Apply diff directly to IDE document (deprecated, use propose_diff)."""
         if not self.connected:
             return False
 

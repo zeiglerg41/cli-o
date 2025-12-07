@@ -3,6 +3,7 @@ import * as WebSocket from 'ws';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { DiffDecorator } from './diffDecorator';
 
 /**
  * WebSocket bridge server for terminal CLI to connect to
@@ -12,10 +13,12 @@ export class BridgeServer {
   private clients: Set<WebSocket> = new Set();
   private port: number = 0;
   private lockFilePath: string;
+  private diffDecorator: DiffDecorator;
 
-  constructor() {
+  constructor(diffDecorator: DiffDecorator) {
     const clioDir = path.join(os.homedir(), '.clio', 'ide');
     this.lockFilePath = path.join(clioDir, 'bridge.json');
+    this.diffDecorator = diffDecorator;
   }
 
   /**
@@ -116,6 +119,10 @@ export class BridgeServer {
         this.handleConnect(ws, message);
         break;
 
+      case 'proposeDiff':
+        await this.handleProposeDiff(ws, message);
+        break;
+
       case 'openDiff':
         await this.handleOpenDiff(ws, message);
         break;
@@ -144,8 +151,29 @@ export class BridgeServer {
     this.send(ws, {
       type: 'connected',
       serverVersion: '0.1.0',
-      capabilities: ['diff', 'apply', 'status']
+      capabilities: ['diff', 'apply', 'status', 'proposeDiff']
     });
+  }
+
+  /**
+   * Handle proposeDiff - show inline diff with accept/reject buttons
+   */
+  private async handleProposeDiff(ws: WebSocket, message: any): Promise<void> {
+    try {
+      const { file, edits, description } = message;
+
+      console.log(`[Clio Bridge] Proposing diff for ${file}:`, description);
+
+      // Show inline diff decorations
+      await this.diffDecorator.showDiff(file, edits, description);
+
+      // Note: We don't send a response here - waiting for user to accept/reject
+      // The accept/reject commands will send diffAccepted or diffRejected
+
+    } catch (error) {
+      console.error('[Clio Bridge] Error proposing diff:', error);
+      this.sendError(ws, `Failed to propose diff: ${error}`);
+    }
   }
 
   /**
@@ -264,6 +292,37 @@ export class BridgeServer {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(message));
     }
+  }
+
+  /**
+   * Broadcast message to all connected clients
+   */
+  private broadcast(message: any): void {
+    this.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify(message));
+      }
+    });
+  }
+
+  /**
+   * Notify all clients that a diff was accepted
+   */
+  notifyDiffAccepted(file: string): void {
+    this.broadcast({
+      type: 'diffAccepted',
+      file: file
+    });
+  }
+
+  /**
+   * Notify all clients that a diff was rejected
+   */
+  notifyDiffRejected(file: string): void {
+    this.broadcast({
+      type: 'diffRejected',
+      file: file
+    });
   }
 
   /**
