@@ -382,9 +382,14 @@ class ChatApp(App):
     async def on_mount(self) -> None:
         """Handle mount."""
         chat_log = self.query_one("#chat-log", RichLog)
+
+        # Get session log path
+        log_path = self.agent.session_logger.get_log_path()
+
         chat_log.write(self._create_panel(
             "[bold cyan]CLIO[/bold cyan] - Command Line Interactive Operator\n\n"
             "A self-hosted AI coding assistant.\n\n"
+            f"📝 Session log: [dim]{log_path}[/dim]\n\n"
             "Type [bold]/help[/bold] for commands or start chatting!",
             title="Welcome"
         ))

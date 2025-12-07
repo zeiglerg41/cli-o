@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional, Callable, Awaitable
 from ..providers import Provider, Message, create_provider
 from ..config.manager import ConfigManager
 from .tools import Tools
+from .session_logger import SessionLogger
 
 
 class Agent:
@@ -20,6 +21,9 @@ class Agent:
         self.tools = Tools(permission_callback)
         self.messages: List[Message] = []
         self.tool_callback = tool_callback
+
+        # Initialize session logger
+        self.session_logger = SessionLogger()
 
         # Load current provider and model
         config = config_manager.load()
@@ -146,46 +150,44 @@ Before executing ANY command or file operation, you MUST:
     
     async def chat(self, user_message: str, context: str = "") -> str:
         """Send a message and get response."""
+        # Log user message
+        self.session_logger.log_user_message(user_message, context)
+
         # Add context if provided
         if context:
             user_message = f"{context}\n\n{user_message}"
-        
+
         # Add user message
         self.messages.append({
             "role": "user",
             "content": user_message
         })
-        
+
         # Prepare messages with system prompt
         messages = [
             {"role": "system", "content": self.system_prompt},
             *self.messages
         ]
-        
+
         # Get tool definitions
         tools = self.tools.get_tool_definitions()
 
-        # Debug logging
-        import sys
+        # Log request details
         total_msg_length = sum(len(str(m.get('content', ''))) for m in messages)
-        debug_msg = f"""[DEBUG] Request info:
-- Total message length: {total_msg_length} chars
-- Number of messages: {len(messages)}
-- Number of tools: {len(tools) if tools else 0}
-- User message preview: {user_message[:200]}...
-- Context preview: {context[:200] if context else 'None'}...
-"""
-        print(debug_msg, file=sys.stderr)
-
-        with open("/tmp/clio_agent_debug.log", "a") as f:
-            f.write(debug_msg + "\n")
+        self.session_logger.log_llm_request(
+            model=self.current_model,
+            message_count=len(messages),
+            tool_count=len(tools) if tools else 0,
+            total_chars=total_msg_length
+        )
 
         # Call LLM
         max_iterations = 10
         iteration = 0
-        
+
         while iteration < max_iterations:
             iteration += 1
+            self.session_logger.log_iteration(iteration, max_iterations)
 
             try:
                 response = await self.provider.chat(
@@ -195,32 +197,36 @@ Before executing ANY command or file operation, you MUST:
                 )
             except Exception as e:
                 error_msg = f"❌ API Error: {str(e)}"
-                import sys
-                print(f"[ERROR] {error_msg}", file=sys.stderr)
+                self.session_logger.log_error(error_msg)
                 return error_msg
 
             # Check if response has choices
             if not response.get("choices") or len(response["choices"]) == 0:
                 error_msg = f"❌ Invalid API response: No choices returned\nFull response: {response}"
-                import sys
-                print(f"[ERROR] {error_msg}", file=sys.stderr)
+                self.session_logger.log_error(error_msg)
                 return error_msg
 
             choice = response["choices"][0]
             message = choice["message"]
-            
+
+            # Log LLM response
+            self.session_logger.log_llm_response(
+                content=message.get("content"),
+                has_tool_calls=bool(message.get("tool_calls")),
+                finish_reason=choice.get("finish_reason", "unknown")
+            )
+
             # Add assistant message
             self.messages.append(message)
             messages.append(message)
-            
+
             # Check if done (only stop if no tool calls)
             if not message.get("tool_calls"):
                 content = message.get("content")
                 if content is None or content == "":
-                    import sys
-                    print(f"[WARN] Model returned empty content. Finish reason: {choice['finish_reason']}", file=sys.stderr)
-                    print(f"[WARN] Full message: {message}", file=sys.stderr)
-                    return f"⚠️ Model returned empty response (finish_reason: {choice['finish_reason']})\nThis may indicate the model refused to respond or encountered an error."
+                    error_msg = f"⚠️ Model returned empty response (finish_reason: {choice['finish_reason']})"
+                    self.session_logger.log_error(error_msg)
+                    return f"{error_msg}\nThis may indicate the model refused to respond or encountered an error."
                 return content
             
             # Execute tool calls
@@ -234,8 +240,14 @@ Before executing ANY command or file operation, you MUST:
                     except json.JSONDecodeError:
                         arguments = {}
 
+                    # Log tool call
+                    self.session_logger.log_tool_call(tool_name, arguments)
+
                     # Execute tool
                     result = await self.tools.execute_tool(tool_name, arguments)
+
+                    # Log tool result
+                    self.session_logger.log_tool_result(tool_name, result)
 
                     # Notify UI about tool execution
                     if self.tool_callback:
@@ -250,8 +262,10 @@ Before executing ANY command or file operation, you MUST:
 
                     self.messages.append(tool_message)
                     messages.append(tool_message)
-        
-        return "Max iterations reached"
+
+        error_msg = "Max iterations reached"
+        self.session_logger.log_error(error_msg)
+        return error_msg
     
     def clear_history(self) -> None:
         """Clear conversation history."""
