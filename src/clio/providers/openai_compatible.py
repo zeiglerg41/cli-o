@@ -55,14 +55,38 @@ class OpenAICompatibleProvider(Provider):
                     "Content-Type": "application/json",
                     **self.headers
                 }
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    json=params,
-                    headers=headers,
-                    timeout=120.0
-                )
-                response.raise_for_status()
-                return response.json()
+                try:
+                    response = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        json=params,
+                        headers=headers,
+                        timeout=300.0  # 5 minutes for larger models
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+
+                    # Debug log the response
+                    import sys
+                    debug_resp = f"""[DEBUG] API Response:
+- Status: {response.status_code}
+- Choices: {len(result.get('choices', []))}
+- Message content length: {len(result['choices'][0].get('message', {}).get('content', '') or '') if result.get('choices') else 0}
+- Message role: {result['choices'][0].get('message', {}).get('role') if result.get('choices') else 'none'}
+- Finish reason: {result['choices'][0].get('finish_reason') if result.get('choices') else 'none'}
+"""
+                    print(debug_resp, file=sys.stderr)
+
+                    with open("/tmp/clio_agent_debug.log", "a") as f:
+                        f.write(debug_resp + "\n")
+                        f.write(f"Full response: {str(result)[:500]}\n\n")
+
+                    return result
+                except httpx.TimeoutException as e:
+                    raise Exception(f"API request timed out after 300s: {str(e)}")
+                except httpx.HTTPStatusError as e:
+                    raise Exception(f"API returned error {e.response.status_code}: {e.response.text}")
+                except Exception as e:
+                    raise Exception(f"API request failed: {str(e)}")
         else:
             response = await self.client.chat.completions.create(**params)
 

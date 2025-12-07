@@ -3,13 +3,16 @@ import asyncio
 import subprocess
 import shutil
 import os
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Header, Footer, Input, RichLog, Static
+from textual.widgets import Header, Footer, Input, RichLog, Static, OptionList
+from textual.widgets.option_list import Option
 from textual.binding import Binding
+from textual import events
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -18,6 +21,7 @@ from ..agent.core import Agent
 from ..context.manager import ContextManager
 from ..config.manager import ConfigManager
 from ..commands.router import CommandRouter
+from ..ide_bridge import get_bridge
 
 try:
     from .file_autocomplete import FileAutoComplete
@@ -29,20 +33,34 @@ except ImportError:
 class ChatApp(App):
     """CLIO chat application."""
 
+    TITLE = "CLIO - Command Line Interactive Operator"
+
     CSS = """
+    Screen {
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
     #chat-log {
         height: 1fr;
+        width: 100%;
+        max-width: 100%;
         border: solid $primary;
         padding: 1;
+        overflow-x: hidden;
+        overflow-y: auto;
     }
 
     #input-container {
         height: auto;
+        width: 100%;
+        max-width: 100%;
         padding: 1;
     }
 
     #status-bar {
         height: 1;
+        width: 100%;
         background: $primary;
         color: $text;
         padding: 0 1;
@@ -50,6 +68,7 @@ class ChatApp(App):
 
     Input {
         width: 100%;
+        max-width: 100%;
     }
     """
 
@@ -72,16 +91,23 @@ class ChatApp(App):
         # Initialize components
         self.config_manager = ConfigManager()
         self.context_manager = ContextManager(working_dir=self.launch_dir)
-        self.agent = Agent(self.config_manager, self.request_permission)
+        self.agent = Agent(self.config_manager, self.request_permission, self.on_tool_executed)
         self.command_router = CommandRouter()
 
         # Register commands
         self._register_commands()
 
+        # IDE bridge will be connected on mount (when event loop is running)
+        self._ide_bridge_connected = False
+
         # State
         self.pending_permission: Optional[asyncio.Future] = None
         self.last_assistant_response: str = ""
         self.conversation_history: List[Dict[str, str]] = []
+
+        # Command history
+        self.command_history: List[str] = []
+        self.history_index: int = -1
     
     def compose(self) -> ComposeResult:
         """Compose UI."""
@@ -112,11 +138,33 @@ class ChatApp(App):
         files_count = len(self.context_manager.list_files())
         tokens = self.context_manager.get_total_tokens()
 
+        # Get hostname for display
+        provider_config = config.providers.get(provider)
+        if provider_config and provider_config.hostname:
+            hostname = provider_config.hostname
+        elif provider_config and provider_config.baseURL:
+            hostname = provider_config.baseURL
+        else:
+            hostname = provider
+
         # Show current directory for @ mentions
         cwd_short = Path(self.launch_dir).name or self.launch_dir
 
-        return f"🤖 {model} @ {provider} | 📁 {files_count} files | 🔢 {tokens:,} tokens | 📂 {cwd_short}"
-    
+        return f"🤖 {model} @ {hostname} | 📁 {files_count} files | 🔢 {tokens:,} tokens | 📂 {cwd_short}"
+
+    async def _do_bridge_connect(self) -> None:
+        """Async task to connect to IDE bridge."""
+        try:
+            bridge = get_bridge()
+            connected = await bridge.connect()
+            if connected:
+                self._ide_bridge_connected = True
+                chat_log = self.query_one("#chat-log", RichLog)
+                chat_log.write("[green]✓ Connected to IDE - edits will appear in real-time![/green]")
+        except Exception as e:
+            # Silently fail - IDE bridge is optional
+            pass
+
     def _register_commands(self) -> None:
         """Register slash commands."""
         self.command_router.register("/help", self._cmd_help)
@@ -173,22 +221,46 @@ class ChatApp(App):
         self.exit()
         return "Goodbye!"
     
-    def _cmd_model(self, args: str) -> str:
-        """List/switch models."""
+    async def _cmd_model(self, args: str) -> str:
+        """List/switch models with numbered selection."""
         config = self.config_manager.load()
-        
-        lines = ["**Available Models:**\n"]
-        
+
+        # Build list of all available models
+        model_options = []
         for provider_name, provider_config in config.providers.items():
-            lines.append(f"\n**{provider_name}** ({provider_config.type}):")
+            hostname = provider_config.hostname or provider_config.baseURL or provider_name
             for model in provider_config.models:
-                marker = "●" if (provider_name == self.agent.current_provider_name and 
-                               model == self.agent.current_model) else "○"
-                lines.append(f"  {marker} {model}")
-        
-        lines.append("\n\nTo switch: `/model <provider> <model>`")
-        lines.append(f"Current: {self.agent.current_provider_name} / {self.agent.current_model}")
-        
+                is_current = (provider_name == self.agent.current_provider_name and
+                            model == self.agent.current_model)
+                marker = "●" if is_current else "○"
+                display_text = f"{marker} {model} @ {hostname}"
+                model_options.append((display_text, provider_name, model, is_current, hostname))
+
+        # If args provided, try to switch by number
+        if args.strip():
+            try:
+                selection = int(args.strip())
+                if 1 <= selection <= len(model_options):
+                    _, provider, model, _, hostname = model_options[selection - 1]
+                    await self.agent.switch_model(provider, model)
+                    return f"✓ Switched to {model} @ {hostname}"
+                else:
+                    return f"❌ Invalid selection. Choose 1-{len(model_options)}"
+            except ValueError:
+                return "❌ Invalid input. Use a number like `/model 2`"
+
+        # Show numbered list
+        lines = ["**Available Models:**\n"]
+        for i, (display, provider, model, is_current, hostname) in enumerate(model_options, 1):
+            lines.append(f"{i}. {display}")
+
+        # Get current provider config for hostname
+        current_provider_config = config.providers[self.agent.current_provider_name]
+        current_hostname = current_provider_config.hostname or current_provider_config.baseURL or self.agent.current_provider_name
+
+        lines.append(f"\n\n**Current:** {self.agent.current_model} @ {current_hostname}")
+        lines.append("\n💡 Type `/model <number>` to switch (e.g., `/model 2`)")
+
         return "\n".join(lines)
     
     def _cmd_files(self, args: str) -> str:
@@ -301,19 +373,64 @@ class ChatApp(App):
         except Exception as e:
             return f"❌ Failed to export: {e}"
     
+    def _create_panel(self, content, title="", border_style="blue"):
+        """Create a panel that fits within the terminal width."""
+        # Get terminal width, subtract padding and borders
+        width = self.size.width - 6  # Account for padding and borders
+        return Panel(content, title=title, border_style=border_style, width=width)
+
     async def on_mount(self) -> None:
         """Handle mount."""
         chat_log = self.query_one("#chat-log", RichLog)
-        chat_log.write(Panel(
+        chat_log.write(self._create_panel(
             "[bold cyan]CLIO[/bold cyan] - Command Line Interactive Operator\n\n"
             "A self-hosted AI coding assistant.\n\n"
             "Type [bold]/help[/bold] for commands or start chatting!",
             title="Welcome"
         ))
-        
+
+        # Try to connect to IDE bridge (now that event loop is running)
+        asyncio.create_task(self._do_bridge_connect())
+
         # Focus input
         self.query_one("#chat-input", Input).focus()
-    
+
+    async def on_key(self, event: events.Key) -> None:
+        """Handle key presses for command history."""
+        chat_input = self.query_one("#chat-input", Input)
+
+        # Only handle arrow keys when input is focused
+        if not chat_input.has_focus:
+            return
+
+        if event.key == "up":
+            # Cycle backward through history
+            if self.command_history:
+                if self.history_index == -1:
+                    # Save current input before navigating history
+                    self.current_draft = chat_input.value
+                    self.history_index = len(self.command_history) - 1
+                elif self.history_index > 0:
+                    self.history_index -= 1
+
+                chat_input.value = self.command_history[self.history_index]
+                chat_input.cursor_position = len(chat_input.value)
+                event.prevent_default()
+
+        elif event.key == "down":
+            # Cycle forward through history
+            if self.command_history and self.history_index != -1:
+                if self.history_index < len(self.command_history) - 1:
+                    self.history_index += 1
+                    chat_input.value = self.command_history[self.history_index]
+                else:
+                    # Return to draft or empty
+                    self.history_index = -1
+                    chat_input.value = getattr(self, 'current_draft', '')
+
+                chat_input.cursor_position = len(chat_input.value)
+                event.prevent_default()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle input submission."""
         user_input = event.value.strip()
@@ -321,12 +438,20 @@ class ChatApp(App):
         if not user_input:
             return
 
+        # Add to command history (avoid duplicates of last command)
+        if not self.command_history or self.command_history[-1] != user_input:
+            self.command_history.append(user_input)
+
+        # Reset history navigation
+        self.history_index = -1
+        self.current_draft = ""
+
         # Clear input
         event.input.value = ""
 
         # Show user message
         chat_log = self.query_one("#chat-log", RichLog)
-        chat_log.write(Panel(user_input, title="[bold cyan]You[/bold cyan]", border_style="cyan"))
+        chat_log.write(self._create_panel(user_input, title="[bold cyan]You[/bold cyan]", border_style="cyan"))
 
         # Add to conversation history
         self.conversation_history.append({"role": "user", "content": user_input})
@@ -337,7 +462,7 @@ class ChatApp(App):
         if command:
             # Execute command
             result = await self.command_router.execute(command, args)
-            chat_log.write(Panel(Markdown(result), title="[bold green]System[/bold green]", border_style="green"))
+            chat_log.write(self._create_panel(Markdown(result), title="[bold green]System[/bold green]", border_style="green"))
 
             # Add system message to history
             self.conversation_history.append({"role": "system", "content": result})
@@ -359,17 +484,19 @@ class ChatApp(App):
 
             try:
                 response = await self.agent.chat(user_input, context)
-                chat_log.write(Panel(Markdown(response), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta"))
+                chat_log.write(self._create_panel(Markdown(response), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta"))
 
                 # Save last response and add to history
                 self.last_assistant_response = response
                 self.conversation_history.append({"role": "assistant", "content": response})
             except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                chat_log.write(f"[red]{error_msg}[/red]")
+                # Get full traceback
+                tb = traceback.format_exc()
+                error_msg = f"**Error:**\n```\n{str(e)}\n\n{tb}\n```"
+                chat_log.write(self._create_panel(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red"))
 
                 # Add error to history
-                self.conversation_history.append({"role": "system", "content": error_msg})
+                self.conversation_history.append({"role": "system", "content": f"Error: {str(e)}"})
 
         # Update status
         status_bar = self.query_one("#status-bar", Static)
@@ -379,16 +506,53 @@ class ChatApp(App):
         """Request permission from user."""
         # For now, auto-approve based on config
         config = self.config_manager.load()
-        
+
         if config.preferences.auto_approve:
             return True
-        
+
         # TODO: Implement interactive permission prompt
         # For now, just log and approve
         chat_log = self.query_one("#chat-log", RichLog)
         chat_log.write(f"[yellow]⚠️  {operation}: {details}[/yellow]")
-        
+
         return True
+
+    async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
+        """Handle tool execution notification."""
+        chat_log = self.query_one("#chat-log", RichLog)
+
+        # Format tool call nicely
+        if tool_name == "edit_file":
+            path = arguments.get("path", "unknown")
+            old_len = len(arguments.get("old_text", ""))
+            new_len = len(arguments.get("new_text", ""))
+            tool_display = f"🔧 **edit_file**: {path} (replaced {old_len} chars with {new_len} chars)"
+        elif tool_name == "write_file":
+            path = arguments.get("path", "unknown")
+            content_len = len(arguments.get("content", ""))
+            tool_display = f"✍️  **write_file**: {path} ({content_len} chars)"
+        elif tool_name == "read_file":
+            path = arguments.get("path", "unknown")
+            tool_display = f"📖 **read_file**: {path}"
+        elif tool_name == "execute_bash":
+            command = arguments.get("command", "unknown")
+            tool_display = f"💻 **execute_bash**: `{command}`"
+        elif tool_name == "list_directory":
+            path = arguments.get("path", ".")
+            tool_display = f"📁 **list_directory**: {path}"
+        else:
+            tool_display = f"🔧 **{tool_name}**: {arguments}"
+
+        # Show result
+        result_preview = result[:200] + "..." if len(result) > 200 else result
+
+        # Create panel with tool execution info
+        tool_info = f"{tool_display}\n\n**Result:**\n{result_preview}"
+        chat_log.write(self._create_panel(
+            Markdown(tool_info),
+            title="[bold yellow]Tool Execution[/bold yellow]",
+            border_style="yellow"
+        ))
     
     def action_clear(self) -> None:
         """Clear chat log."""

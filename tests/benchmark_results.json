@@ -1,0 +1,241 @@
+{
+  "llama3.1:8b": {
+    "total_duration": 136.1603968143463,
+    "avg_duration": 27.232079362869264,
+    "avg_accuracy": 80.0,
+    "success_rate": 100.0,
+    "test_results": [
+      {
+        "test_name": "Simple Question",
+        "success": true,
+        "duration": 3.0372090339660645,
+        "accuracy": 50.0,
+        "response_length": 25,
+        "used_tools": false
+      },
+      {
+        "test_name": "Code Generation",
+        "success": true,
+        "duration": 49.469887256622314,
+        "accuracy": 100.0,
+        "response_length": 1788,
+        "used_tools": false
+      },
+      {
+        "test_name": "Tool Calling - File Read",
+        "success": true,
+        "duration": 12.227609872817993,
+        "accuracy": 50.0,
+        "response_length": 0,
+        "used_tools": true
+      },
+      {
+        "test_name": "Context Understanding",
+        "success": true,
+        "duration": 28.064055919647217,
+        "accuracy": 100.0,
+        "response_length": 1205,
+        "used_tools": false
+      },
+      {
+        "test_name": "Reasoning Task",
+        "success": true,
+        "duration": 43.361634731292725,
+        "accuracy": 100.0,
+        "response_length": 1384,
+        "used_tools": false
+      }
+    ]
+  },
+  "qwen2.5:7b": {
+    "total_duration": 162.35378122329712,
+    "avg_duration": 32.47075624465943,
+    "avg_accuracy": 80.0,
+    "success_rate": 100.0,
+    "test_results": [
+      {
+        "test_name": "Simple Question",
+        "success": true,
+        "duration": 30.15584683418274,
+        "accuracy": 50.0,
+        "response_length": 15,
+        "used_tools": false
+      },
+      {
+        "test_name": "Code Generation",
+        "success": true,
+        "duration": 42.49573016166687,
+        "accuracy": 100.0,
+        "response_length": 1419,
+        "used_tools": false
+      },
+      {
+        "test_name": "Tool Calling - File Read",
+        "success": true,
+        "duration": 10.942292213439941,
+        "accuracy": 50.0,
+        "response_length": 0,
+        "used_tools": true
+      },
+      {
+        "test_name": "Context Understanding",
+        "success": true,
+        "duration": 39.23515558242798,
+        "accuracy": 100.0,
+        "response_length": 1564,
+        "used_tools": false
+      },
+      {
+        "test_name": "Reasoning Task",
+        "success": true,
+        "duration": 39.52475643157959,
+        "accuracy": 100.0,
+        "response_length": 1074,
+        "used_tools": false
+      }
+    ]
+  },
+  "qwen2.5:3b": {
+    "total_duration": 68.91498017311096,
+    "avg_duration": 13.782996034622192,
+    "avg_accuracy": 70.0,
+    "success_rate": 100.0,
+    "test_results": [
+      {
+        "test_name": "Simple Question",
+        "success": true,
+        "duration": 11.80381989479065,
+        "accuracy": 50.0,
+        "response_length": 15,
+        "used_tools": false
+      },
+      {
+        "test_name": "Code Generation",
+        "success": true,
+        "duration": 22.29577898979187,
+        "accuracy": 100.0,
+        "response_length": 1581,
+        "used_tools": false
+      },
+      {
+        "test_name": "Tool Calling - File Read",
+        "success": true,
+        "duration": 6.040528297424316,
+        "accuracy": 50.0,
+        "response_length": 0,
+        "used_tools": true
+      },
+      {
+        "test_name": "Context Understanding",
+        "success": true,
+        "duration": 8.396965980529785,
+        "accuracy": 50.0,
+        "response_length": 666,
+        "used_tools": false
+      },
+      {
+        "test_name": "Reasoning Task",
+        "success": true,
+        "duration": 20.37788701057434,
+        "accuracy": 100.0,
+        "response_length": 1280,
+        "used_tools": false
+      }
+    ]
+  },
+  "mistral:7b": {
+    "total_duration": 102.09207510948181,
+    "avg_duration": 20.41841502189636,
+    "avg_accuracy": 73.33333333333333,
+    "success_rate": 100.0,
+    "test_results": [
+      {
+        "test_name": "Simple Question",
+        "success": true,
+        "duration": 10.778533935546875,
+        "accuracy": 50.0,
+        "response_length": 25,
+        "used_tools": false
+      },
+      {
+        "test_name": "Code Generation",
+        "success": true,
+        "duration": 28.951170682907104,
+        "accuracy": 100.0,
+        "response_length": 826,
+        "used_tools": false
+      },
+      {
+        "test_name": "Tool Calling - File Read",
+        "success": true,
+        "duration": 9.655693769454956,
+        "accuracy": 50.0,
+        "response_length": 0,
+        "used_tools": true
+      },
+      {
+        "test_name": "Context Understanding",
+        "success": true,
+        "duration": 32.41029381752014,
+        "accuracy": 100.0,
+        "response_length": 1297,
+        "used_tools": false
+      },
+      {
+        "test_name": "Reasoning Task",
+        "success": true,
+        "duration": 20.296382904052734,
+        "accuracy": 66.66666666666666,
+        "response_length": 617,
+        "used_tools": false
+      }
+    ]
+  },
+  "gemma2:2b": {
+    "total_duration": 60.58405137062073,
+    "avg_duration": 15.146012842655182,
+    "avg_accuracy": 87.5,
+    "success_rate": 80.0,
+    "test_results": [
+      {
+        "test_name": "Simple Question",
+        "success": true,
+        "duration": 5.016852378845215,
+        "accuracy": 50.0,
+        "response_length": 15,
+        "used_tools": false
+      },
+      {
+        "test_name": "Code Generation",
+        "success": true,
+        "duration": 28.56953477859497,
+        "accuracy": 100.0,
+        "response_length": 1476,
+        "used_tools": false
+      },
+      {
+        "test_name": "Tool Calling - File Read",
+        "success": false,
+        "error": "Client error '400 Bad Request' for url 'https://open-webui-remote-1.tech/api/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400",
+        "duration": 0,
+        "accuracy": 0
+      },
+      {
+        "test_name": "Context Understanding",
+        "success": true,
+        "duration": 12.138895511627197,
+        "accuracy": 100.0,
+        "response_length": 763,
+        "used_tools": false
+      },
+      {
+        "test_name": "Reasoning Task",
+        "success": true,
+        "duration": 14.858768701553345,
+        "accuracy": 100.0,
+        "response_length": 665,
+        "used_tools": false
+      }
+    ]
+  }
+}

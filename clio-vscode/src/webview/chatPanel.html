@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clio Chat</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-foreground);
+      background-color: var(--vscode-editor-background);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .message {
+      padding: 12px;
+      border-radius: 6px;
+      max-width: 85%;
+      word-wrap: break-word;
+      line-height: 1.5;
+    }
+
+    .user-message {
+      background-color: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      align-self: flex-end;
+      margin-left: auto;
+    }
+
+    .assistant-message {
+      background-color: var(--vscode-editor-inactiveSelectionBackground);
+      color: var(--vscode-foreground);
+      align-self: flex-start;
+      border-left: 3px solid var(--vscode-textLink-foreground);
+    }
+
+    .tool-message {
+      background-color: var(--vscode-inputValidation-warningBackground);
+      color: var(--vscode-inputValidation-warningForeground);
+      align-self: flex-start;
+      font-size: 0.9em;
+      border-left: 3px solid var(--vscode-inputValidation-warningBorder);
+    }
+
+    .status-message {
+      background-color: var(--vscode-inputValidation-infoBackground);
+      color: var(--vscode-inputValidation-infoForeground);
+      align-self: center;
+      font-size: 0.85em;
+      font-style: italic;
+      border-left: 3px solid var(--vscode-inputValidation-infoBorder);
+    }
+
+    #input-container {
+      padding: 16px;
+      background-color: var(--vscode-input-background);
+      border-top: 1px solid var(--vscode-panel-border);
+      display: flex;
+      gap: 8px;
+    }
+
+    #input {
+      flex: 1;
+      padding: 10px;
+      background-color: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: inherit;
+      outline: none;
+    }
+
+    #input:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+
+    #send-button {
+      padding: 10px 20px;
+      background-color: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: inherit;
+    }
+
+    #send-button:hover {
+      background-color: var(--vscode-button-hoverBackground);
+    }
+
+    #send-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .timestamp {
+      font-size: 0.75em;
+      opacity: 0.7;
+      margin-top: 4px;
+    }
+
+    /* Scrollbar styling */
+    #messages::-webkit-scrollbar {
+      width: 10px;
+    }
+
+    #messages::-webkit-scrollbar-track {
+      background: var(--vscode-scrollbarSlider-background);
+    }
+
+    #messages::-webkit-scrollbar-thumb {
+      background: var(--vscode-scrollbarSlider-hoverBackground);
+      border-radius: 5px;
+    }
+
+    #messages::-webkit-scrollbar-thumb:hover {
+      background: var(--vscode-scrollbarSlider-activeBackground);
+    }
+  </style>
+</head>
+<body>
+  <div id="messages"></div>
+  <div id="input-container">
+    <input id="input" type="text" placeholder="Ask Clio to help with your code..." />
+    <button id="send-button">Send</button>
+  </div>
+
+  <script>
+    // Get VS Code API
+    const vscode = acquireVsCodeApi();
+    
+    // Get DOM elements
+    const input = document.getElementById('input');
+    const sendButton = document.getElementById('send-button');
+    const messages = document.getElementById('messages');
+
+    // Handle send button click
+    sendButton.addEventListener('click', sendMessage);
+
+    // Handle Enter key press
+    input.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // Send message to extension
+    function sendMessage() {
+      const text = input.value.trim();
+      if (!text) {
+        return;
+      }
+
+      // Send to extension
+      vscode.postMessage({
+        command: 'sendMessage',
+        text: text
+      });
+
+      // Add to UI
+      addMessage('user', text);
+
+      // Clear input
+      input.value = '';
+      input.focus();
+    }
+
+    // Listen for messages from extension
+    window.addEventListener('message', (event) => {
+      const message = event.data;
+      
+      switch (message.type) {
+        case 'response':
+          addMessage('assistant', message.content);
+          break;
+        case 'tool':
+          addMessage('tool', `🔧 ${message.tool}: ${message.result}`);
+          break;
+        case 'status':
+          addMessage('status', `⚡ ${message.activity}`);
+          break;
+        case 'error':
+          addMessage('assistant', `❌ Error: ${message.content}`);
+          break;
+      }
+    });
+
+    // Add message to UI
+    function addMessage(type, content) {
+      const div = document.createElement('div');
+      div.className = `message ${type}-message`;
+      
+      // Create message content
+      const contentDiv = document.createElement('div');
+      contentDiv.textContent = content;
+      div.appendChild(contentDiv);
+      
+      // Add timestamp
+      const timestamp = document.createElement('div');
+      timestamp.className = 'timestamp';
+      timestamp.textContent = new Date().toLocaleTimeString();
+      div.appendChild(timestamp);
+      
+      messages.appendChild(div);
+      
+      // Scroll to bottom
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    // Focus input on load
+    input.focus();
+
+    // Restore state if available
+    const state = vscode.getState();
+    if (state && state.messages) {
+      // Restore previous messages
+      state.messages.forEach(msg => {
+        addMessage(msg.type, msg.content);
+      });
+    }
+
+    // Save state periodically
+    function saveState() {
+      const messageElements = messages.querySelectorAll('.message');
+      const savedMessages = Array.from(messageElements).map(el => {
+        const type = el.className.split('-')[0];
+        const content = el.querySelector('div').textContent;
+        return { type, content };
+      });
+      
+      vscode.setState({ messages: savedMessages });
+    }
+
+    // Save state on new messages
+    const observer = new MutationObserver(saveState);
+    observer.observe(messages, { childList: true });
+  </script>
+</body>
+</html>

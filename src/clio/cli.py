@@ -65,5 +65,16 @@ def version():
     click.echo("Claude Clone v0.1.0")
 
 
+@main.command()
+@click.option('--working-dir', default=None, help='Working directory')
+def vscode(working_dir):
+    """Run in VSCode extension mode (JSON protocol via stdio)."""
+    import asyncio
+    from .vscode_mode import run_vscode_mode
+
+    working_dir = working_dir or _LAUNCH_CWD
+    asyncio.run(run_vscode_mode(working_dir))
+
+
 if __name__ == "__main__":
     main()

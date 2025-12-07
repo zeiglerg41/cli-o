@@ -2,16 +2,22 @@
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable, Awaitable, Any
 import aiofiles
+from ..ide_bridge import get_bridge
 
 
 class Tools:
     """Collection of tools for the agent."""
-    
-    def __init__(self, permission_callback: Optional[Callable[[str, str], Awaitable[bool]]] = None):
+
+    def __init__(
+        self,
+        permission_callback: Optional[Callable[[str, str], Awaitable[bool]]] = None,
+        vscode_protocol: Optional[Any] = None
+    ):
         """Initialize tools."""
         self.permission_callback = permission_callback
+        self.vscode_protocol = vscode_protocol
     
     async def request_permission(self, operation: str, details: str) -> bool:
         """Request permission for an operation."""
@@ -57,6 +63,14 @@ class Tools:
             # Create parent directories
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # Decode escaped characters (handle LLMs that escape newlines)
+            # Use encode/decode to convert literal \n to actual newlines
+            try:
+                content = content.encode().decode('unicode_escape')
+            except Exception:
+                # If decoding fails, use content as-is
+                pass
+
             # Write file
             async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                 await f.write(content)
@@ -68,33 +82,87 @@ class Tools:
     async def edit_file(self, path: str, old_text: str, new_text: str) -> str:
         """Edit a file by replacing old_text with new_text."""
         try:
+            # Decode escaped characters in old_text and new_text
+            try:
+                old_text = old_text.encode().decode('unicode_escape')
+            except Exception:
+                pass
+
+            try:
+                new_text = new_text.encode().decode('unicode_escape')
+            except Exception:
+                pass
+
             # Read current content
             content = await self.read_file(path)
-            
+
             if content.startswith("Error:"):
                 return content
-            
+
             # Check if old_text exists
             if old_text not in content:
                 return f"Error: Text not found in file: {old_text[:100]}..."
-            
-            # Replace
+
+            # Find position of old_text for VSCode range
+            start_pos = content.find(old_text)
+            lines_before = content[:start_pos].count('\n')
+            char_in_line = start_pos - content[:start_pos].rfind('\n') - 1 if '\n' in content[:start_pos] else start_pos
+
+            end_pos = start_pos + len(old_text)
+            lines_in_old = old_text.count('\n')
+            if '\n' in old_text:
+                last_line_start = old_text.rfind('\n') + 1
+                end_char = len(old_text) - last_line_start
+            else:
+                end_char = char_in_line + len(old_text)
+
+            # If in VSCode mode, emit edit message instead of writing file
+            if self.vscode_protocol:
+                self.vscode_protocol.send_edit(
+                    file_path=path,
+                    edits=[{
+                        "range": {
+                            "start": {"line": lines_before, "character": max(0, char_in_line)},
+                            "end": {"line": lines_before + lines_in_old, "character": end_char}
+                        },
+                        "newText": new_text
+                    }]
+                )
+                return f"Successfully edited {path}"
+
+            # Check for IDE bridge
+            bridge = get_bridge()
+            if bridge.is_connected():
+                # Send diff to IDE
+                await bridge.apply_diff(
+                    file_path=path,
+                    edits=[{
+                        "range": {
+                            "start": {"line": lines_before, "character": max(0, char_in_line)},
+                            "end": {"line": lines_before + lines_in_old, "character": end_char}
+                        },
+                        "newText": new_text
+                    }]
+                )
+                return f"Successfully edited {path}"
+
+            # Normal mode: write file
             new_content = content.replace(old_text, new_text, 1)
-            
+
             # Request permission
             operation = "edit_file"
             details = f"Edit {path}: replace {len(old_text)} chars with {len(new_text)} chars"
-            
+
             if not await self.request_permission(operation, details):
                 return "Permission denied"
-            
-            # Write back
-            result = await self.write_file(path, new_content)
-            
-            if result.startswith("Successfully"):
-                return f"Successfully edited {path}"
-            
-            return result
+
+            # Write back - but skip the unicode_escape decode since we already did it above
+            file_path = Path(path).resolve()
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
+                await f.write(new_content)
+
+            return f"Successfully edited {path}"
         except Exception as e:
             return f"Error editing file: {str(e)}"
     
