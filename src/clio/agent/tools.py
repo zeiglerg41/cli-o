@@ -273,13 +273,13 @@ class Tools:
         """List contents of a directory."""
         try:
             dir_path = Path(path).resolve()
-            
+
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"
-            
+
             if not dir_path.is_dir():
                 return f"Error: Not a directory: {path}"
-            
+
             items = []
             for item in sorted(dir_path.iterdir()):
                 if item.is_dir():
@@ -287,10 +287,49 @@ class Tools:
                 else:
                     size = item.stat().st_size
                     items.append(f"📄 {item.name} ({size} bytes)")
-            
+
             return "\n".join(items) if items else "Empty directory"
         except Exception as e:
             return f"Error listing directory: {str(e)}"
+
+    async def grep_files(self, pattern: str, path: str = ".", file_pattern: str = "*") -> str:
+        """Search for a pattern in files using grep.
+
+        Args:
+            pattern: The regex pattern to search for
+            path: Directory to search in (default: current directory)
+            file_pattern: File pattern to match (e.g., "*.py", "*.js")
+        """
+        try:
+            # Use ripgrep if available, otherwise fall back to grep
+            cmd = f"rg --no-heading --line-number --color never '{pattern}' '{path}' --glob '{file_pattern}' 2>/dev/null || grep -rn '{pattern}' {path} --include='{file_pattern}' 2>/dev/null"
+            result = await self.execute_bash(cmd, timeout=10)
+
+            if "Error:" in result or not result.strip():
+                return f"No matches found for pattern '{pattern}'"
+
+            return result
+        except Exception as e:
+            return f"Error searching files: {str(e)}"
+
+    async def find_files(self, name_pattern: str = "*", path: str = ".", file_type: str = "f") -> str:
+        """Find files matching a pattern.
+
+        Args:
+            name_pattern: File name pattern (e.g., "*.py", "auth*")
+            path: Directory to search in (default: current directory)
+            file_type: Type of file (f=file, d=directory, default: f)
+        """
+        try:
+            cmd = f"find '{path}' -type {file_type} -name '{name_pattern}' 2>/dev/null | head -100"
+            result = await self.execute_bash(cmd, timeout=10)
+
+            if "Error:" in result or not result.strip():
+                return f"No files found matching pattern '{name_pattern}'"
+
+            return result
+        except Exception as e:
+            return f"Error finding files: {str(e)}"
     
     def get_tool_definitions(self) -> list[dict]:
         """Get OpenAI function definitions for tools."""
@@ -396,6 +435,60 @@ class Tools:
                         }
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "grep_files",
+                    "description": "Search for a pattern in files. Use this to find code containing specific text, functions, classes, or keywords.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "The regex pattern to search for (e.g., 'def authenticate', 'class User', 'import requests')"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Directory to search in (default: current directory)",
+                                "default": "."
+                            },
+                            "file_pattern": {
+                                "type": "string",
+                                "description": "File pattern to match (e.g., '*.py', '*.js', '*.rs')",
+                                "default": "*"
+                            }
+                        },
+                        "required": ["pattern"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_files",
+                    "description": "Find files by name pattern. Use this to locate files when you don't know their exact path.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name_pattern": {
+                                "type": "string",
+                                "description": "File name pattern (e.g., '*.py', 'auth*', 'test_*.js')",
+                                "default": "*"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Directory to search in (default: current directory)",
+                                "default": "."
+                            },
+                            "file_type": {
+                                "type": "string",
+                                "description": "Type of file (f=file, d=directory)",
+                                "default": "f"
+                            }
+                        }
+                    }
+                }
             }
         ]
     
@@ -411,5 +504,9 @@ class Tools:
             return await self.execute_bash(**arguments)
         elif tool_name == "list_directory":
             return await self.list_directory(**arguments)
+        elif tool_name == "grep_files":
+            return await self.grep_files(**arguments)
+        elif tool_name == "find_files":
+            return await self.find_files(**arguments)
         else:
             return f"Error: Unknown tool: {tool_name}"

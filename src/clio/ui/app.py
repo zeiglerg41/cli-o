@@ -22,9 +22,11 @@ from ..context.manager import ContextManager
 from ..config.manager import ConfigManager
 from ..commands.router import CommandRouter
 from ..ide_bridge import get_bridge
+from ..history.database import HistoryDatabase
 
 try:
     from .file_autocomplete import FileAutoComplete
+    from .command_autocomplete import CommandAutoComplete
     HAS_AUTOCOMPLETE = True
 except ImportError:
     HAS_AUTOCOMPLETE = False
@@ -81,17 +83,28 @@ class ChatApp(App):
     # Users can hold Shift and select text with the mouse
     ENABLE_COMMAND_PALETTE = False
     
-    def __init__(self, launch_dir: Optional[str] = None):
-        """Initialize app."""
+    def __init__(self, launch_dir: Optional[str] = None, conversation_id: Optional[int] = None):
+        """Initialize app.
+
+        Args:
+            launch_dir: Working directory for the app
+            conversation_id: If provided, resume from this conversation
+        """
         super().__init__()
 
         # Store the working directory from when the app was launched
         self.launch_dir = launch_dir or os.getcwd()
+        self.conversation_id = conversation_id
 
         # Initialize components
         self.config_manager = ConfigManager()
         self.context_manager = ContextManager(working_dir=self.launch_dir)
-        self.agent = Agent(self.config_manager, self.request_permission, self.on_tool_executed)
+        self.agent = Agent(
+            self.config_manager,
+            self.request_permission,
+            self.on_tool_executed,
+            conversation_id=conversation_id
+        )
         self.command_router = CommandRouter()
 
         # Register commands
@@ -127,6 +140,7 @@ class ChatApp(App):
             # Add autocomplete if available
             if HAS_AUTOCOMPLETE:
                 yield FileAutoComplete(chat_input, Path(self.launch_dir))
+                yield CommandAutoComplete(chat_input, self.command_router)
 
         yield Footer()
     
@@ -177,6 +191,9 @@ class ChatApp(App):
         self.command_router.register("/config", self._cmd_config)
         self.command_router.register("/copy", self._cmd_copy)
         self.command_router.register("/export", self._cmd_export)
+        self.command_router.register("/history", self._cmd_history)
+        self.command_router.register("/cleanup", self._cmd_cleanup)
+        self.command_router.register("/continue", self._cmd_continue)
     
     def _cmd_help(self, args: str) -> str:
         """Show help."""
@@ -192,6 +209,9 @@ class ChatApp(App):
 - `/config` - Show configuration
 - `/copy` - Copy last assistant response to clipboard
 - `/export [filename]` - Export conversation to markdown file
+- `/history` - List recent conversations
+- `/continue <id>` - Continue a previous conversation (exits current session)
+- `/cleanup` - Delete old conversations (keep only 20 most recent)
 
 **@-mentions:**
 - `@filename` - Reference a file (will be added to context)
@@ -207,6 +227,8 @@ class ChatApp(App):
 - `/model` to switch models
 - `/copy` to copy last response
 - `/export my-chat.md` to save conversation
+- `/history` to list recent conversations
+- `/continue 5` to resume conversation #5
 """
     
     def _cmd_clear(self, args: str) -> str:
@@ -372,6 +394,65 @@ class ChatApp(App):
             return f"✓ Exported conversation to: {abs_path}"
         except Exception as e:
             return f"❌ Failed to export: {e}"
+
+    def _cmd_history(self, args: str) -> str:
+        """List recent conversations."""
+        db = HistoryDatabase()
+        conversations = db.get_recent_conversations(limit=20)
+        db.close()
+
+        if not conversations:
+            return "No conversation history found."
+
+        lines = ["**📜 Recent Conversations (20 most recent):**\n"]
+
+        for conv in conversations:
+            conv_id = conv['id']
+            start_time = datetime.fromisoformat(conv['start_time']).strftime('%Y-%m-%d %H:%M:%S')
+            model = conv['model']
+            msg_count = conv['message_count']
+            title = conv['title'] or f"Conversation in {Path(conv['working_dir']).name}"
+            starred = "⭐ " if conv['starred'] else ""
+
+            lines.append(f"\n**[{conv_id}]** {starred}{title}")
+            lines.append(f"  {start_time} | {model} | {msg_count} messages")
+
+        lines.append("\n\n💡 Type `/continue <id>` to resume a conversation")
+
+        return "\n".join(lines)
+
+    def _cmd_cleanup(self, args: str) -> str:
+        """Delete old conversations (keep only 20 most recent)."""
+        db = HistoryDatabase()
+        deleted = db.cleanup_old_conversations(keep_recent=20)
+        db.close()
+
+        if deleted:
+            return f"✓ Deleted {deleted} old conversation(s)"
+        else:
+            return "✓ No old conversations to delete"
+
+    def _cmd_continue(self, args: str) -> str:
+        """Continue a previous conversation."""
+        if not args.strip():
+            return "❌ Usage: /continue <id>\n\nUse `/history` to see available conversations"
+
+        try:
+            conversation_id = int(args.strip())
+        except ValueError:
+            return "❌ Invalid conversation ID. Must be a number."
+
+        # Verify conversation exists
+        db = HistoryDatabase()
+        conversations = db.get_recent_conversations(limit=100)
+        conv_ids = [c['id'] for c in conversations]
+        db.close()
+
+        if conversation_id not in conv_ids:
+            return f"❌ Conversation {conversation_id} not found.\n\nUse `/history` to see available conversations"
+
+        # Exit and restart with this conversation
+        return f"⚠️ To continue conversation {conversation_id}, please exit this session and run:\n\n  `clio --continue {conversation_id}`"
     
     def _create_panel(self, content, title="", border_style="blue"):
         """Create a panel that fits within the terminal width."""

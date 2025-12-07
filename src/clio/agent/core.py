@@ -1,10 +1,12 @@
 """Core agent implementation."""
 import json
+import os
 from typing import List, Dict, Any, Optional, Callable, Awaitable
 from ..providers import Provider, Message, create_provider
 from ..config.manager import ConfigManager
 from .tools import Tools
 from .session_logger import SessionLogger
+from ..history.database import HistoryDatabase
 
 
 class Agent:
@@ -14,9 +16,14 @@ class Agent:
         self,
         config_manager: ConfigManager,
         permission_callback: Optional[Callable[[str, str], Awaitable[bool]]] = None,
-        tool_callback: Optional[Callable[[str, Dict[str, Any], str], Awaitable[None]]] = None
+        tool_callback: Optional[Callable[[str, Dict[str, Any], str], Awaitable[None]]] = None,
+        conversation_id: Optional[int] = None
     ):
-        """Initialize agent."""
+        """Initialize agent.
+
+        Args:
+            conversation_id: If provided, resume from this conversation ID
+        """
         self.config_manager = config_manager
         self.tools = Tools(permission_callback)
         self.messages: List[Message] = []
@@ -24,6 +31,10 @@ class Agent:
 
         # Initialize session logger
         self.session_logger = SessionLogger()
+
+        # Initialize history database
+        self.history_db = HistoryDatabase()
+        self.conversation_id = conversation_id
 
         # Load current provider and model
         config = config_manager.load()
@@ -43,7 +54,21 @@ class Agent:
             provider_config.type,
             provider_dict
         )
-        
+
+        # Create or resume conversation in database
+        if self.conversation_id:
+            # Resume existing conversation - load messages
+            messages = self.history_db.get_conversation_messages(self.conversation_id)
+            self.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+        else:
+            # Create new conversation
+            working_dir = os.getcwd()
+            self.conversation_id = self.history_db.create_conversation(
+                working_dir=working_dir,
+                model=self.current_model,
+                provider=self.current_provider_name
+            )
+
         # System prompt
         self.system_prompt = """You are CLIO, a direct-action AI coding assistant. Your primary purpose is to EDIT FILES AND EXECUTE CODE, not just suggest changes.
 
@@ -64,6 +89,8 @@ Example:
 - `read_file(path)` - Read file contents (only if not in context)
 - `execute_bash(command)` - Run shell commands
 - `list_directory(path)` - List directory contents
+- `grep_files(pattern, path=".", file_pattern="*")` - Search for code/text in files
+- `find_files(name_pattern, path=".")` - Find files by name pattern
 
 ## File Context (@-mentions)
 When user mentions @file (e.g., "@calculator.py"), the file content is ALREADY included above the "===" separator.
@@ -77,11 +104,23 @@ When user mentions @file (e.g., "@calculator.py"), the file content is ALREADY i
 Only use `read_file` for NEW files not in context.
 
 ## Workflow for Code Changes
-1. Read/understand the file (if not in context)
-2. Identify what needs changing
-3. **IMMEDIATELY use edit_file or write_file** - don't wait for permission
-4. Confirm what you changed
-5. If tests exist, offer to run them
+1. If you don't know which files to edit, use `grep_files` or `find_files` to locate relevant code
+2. Read/understand the file (if not in context)
+3. Identify what needs changing
+4. **IMMEDIATELY use edit_file or write_file** - don't wait for permission
+5. Confirm what you changed
+6. If tests exist, offer to run them
+
+## Finding Code Without @-mentions
+When the user asks about code without mentioning specific files:
+1. **USE grep_files** to search for relevant keywords, functions, or classes
+2. **USE find_files** to locate files by name pattern
+3. Read the files you find, then proceed with the task
+
+Examples:
+- "Fix the authentication bug" → grep_files("auth|login|authenticate", file_pattern="*.py")
+- "Add logging to the API" → grep_files("class.*API|def.*api", file_pattern="*.py")
+- "Where is the User model?" → grep_files("class User", file_pattern="*.py")
 
 ## Error Recovery - CRITICAL
 If a tool returns an error (especially "Text not found in file"):
@@ -175,6 +214,13 @@ Before executing ANY command or file operation, you MUST:
             "content": user_message
         })
 
+        # Save user message to history
+        self.history_db.add_message(
+            conversation_id=self.conversation_id,
+            role="user",
+            content=user_message
+        )
+
         # Prepare messages with system prompt
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -232,6 +278,15 @@ Before executing ANY command or file operation, you MUST:
             self.messages.append(message)
             messages.append(message)
 
+            # Save assistant message to history
+            tool_calls_json = json.dumps(message.get("tool_calls")) if message.get("tool_calls") else None
+            self.history_db.add_message(
+                conversation_id=self.conversation_id,
+                role="assistant",
+                content=message.get("content", ""),
+                tool_calls=tool_calls_json
+            )
+
             # Check if done (only stop if no tool calls)
             if not message.get("tool_calls"):
                 content = message.get("content")
@@ -274,6 +329,13 @@ Before executing ANY command or file operation, you MUST:
 
                     self.messages.append(tool_message)
                     messages.append(tool_message)
+
+                    # Save tool result to history
+                    self.history_db.add_message(
+                        conversation_id=self.conversation_id,
+                        role="tool",
+                        content=result
+                    )
 
         error_msg = "Max iterations reached"
         self.session_logger.log_error(error_msg)
