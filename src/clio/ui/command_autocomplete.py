@@ -27,6 +27,7 @@ class CommandAutoComplete(AutoComplete):
             ("/history", "List recent conversations"),
             ("/continue", "Continue a previous conversation"),
             ("/cleanup", "Delete old conversations"),
+            ("/web", "Search the web"),
         ]
         return commands
 

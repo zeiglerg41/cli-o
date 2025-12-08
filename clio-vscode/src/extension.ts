@@ -59,13 +59,67 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  // Register accept single edit command
+  const acceptEditCommand = vscode.commands.registerCommand(
+    'clio.acceptEdit',
+    async (filePath: string, editIndex: number) => {
+      const success = await diffDecorator.acceptEdit(filePath, editIndex);
+      if (success) {
+        codeLensProvider.refresh();
+        vscode.window.showInformationMessage(`Edit ${editIndex + 1} accepted`);
+      }
+    }
+  );
+
+  // Register reject single edit command
+  const rejectEditCommand = vscode.commands.registerCommand(
+    'clio.rejectEdit',
+    async (filePath: string, editIndex: number) => {
+      const success = await diffDecorator.rejectEdit(filePath, editIndex);
+      if (success) {
+        codeLensProvider.refresh();
+        vscode.window.showInformationMessage(`Edit ${editIndex + 1} rejected`);
+      }
+    }
+  );
+
+  // Register accept all edits command
+  const acceptAllEditsCommand = vscode.commands.registerCommand(
+    'clio.acceptAllEdits',
+    async (filePath: string) => {
+      const success = await diffDecorator.acceptAllEdits(filePath);
+      if (success) {
+        bridgeServer.notifyDiffAccepted(filePath);
+        codeLensProvider.refresh();
+        vscode.window.showInformationMessage('All changes accepted');
+      }
+    }
+  );
+
+  // Register reject all edits command
+  const rejectAllEditsCommand = vscode.commands.registerCommand(
+    'clio.rejectAllEdits',
+    async (filePath: string) => {
+      const success = await diffDecorator.rejectAllEdits(filePath);
+      if (success) {
+        bridgeServer.notifyDiffRejected(filePath);
+        codeLensProvider.refresh();
+        vscode.window.showInformationMessage('All changes rejected');
+      }
+    }
+  );
+
   // Cleanup on deactivation
   context.subscriptions.push(
     { dispose: () => bridgeServer.stop() },
     { dispose: () => diffDecorator.dispose() },
     codeLensDisposable,
     acceptDiffCommand,
-    undoDiffCommand
+    undoDiffCommand,
+    acceptEditCommand,
+    rejectEditCommand,
+    acceptAllEditsCommand,
+    rejectAllEditsCommand
   );
 
   // Initialize core components

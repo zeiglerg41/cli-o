@@ -26,34 +26,62 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
             return codeLenses;
         }
 
-        // Add Undo button above the first changed line
+        // Add Accept All / Reject All buttons above the first changed line
         if (pendingDiff.edits.length > 0) {
             const firstEdit = pendingDiff.edits[0];
-            const range = new vscode.Range(
+            const topRange = new vscode.Range(
                 firstEdit.range.start.line,
                 0,
                 firstEdit.range.start.line,
                 0
             );
 
-            // Accept button
+            // Accept All button
+            const acceptAllLens = new vscode.CodeLens(topRange, {
+                title: `✓ Accept All (${pendingDiff.edits.length})`,
+                tooltip: `Accept all changes: ${pendingDiff.description}`,
+                command: 'clio.acceptAllEdits',
+                arguments: [filePath],
+            });
+            codeLenses.push(acceptAllLens);
+
+            // Reject All button
+            const rejectAllLens = new vscode.CodeLens(topRange, {
+                title: `✗ Reject All`,
+                tooltip: `Reject all changes and undo: ${pendingDiff.description}`,
+                command: 'clio.rejectAllEdits',
+                arguments: [filePath],
+            });
+            codeLenses.push(rejectAllLens);
+        }
+
+        // Add individual Accept/Reject buttons for each edit
+        pendingDiff.edits.forEach((edit, index) => {
+            const range = new vscode.Range(
+                edit.range.start.line,
+                0,
+                edit.range.start.line,
+                0
+            );
+
+            // Accept this edit
             const acceptLens = new vscode.CodeLens(range, {
                 title: '✓ Accept',
-                tooltip: `Accept changes: ${pendingDiff.description}`,
-                command: 'clio.acceptDiff',
-                arguments: [filePath],
+                tooltip: `Accept this change`,
+                command: 'clio.acceptEdit',
+                arguments: [filePath, index],
             });
             codeLenses.push(acceptLens);
 
-            // Undo button
-            const undoLens = new vscode.CodeLens(range, {
-                title: '↶ Undo',
-                tooltip: `Undo changes: ${pendingDiff.description}`,
-                command: 'clio.undoDiff',
-                arguments: [filePath],
+            // Reject this edit
+            const rejectLens = new vscode.CodeLens(range, {
+                title: '✗ Reject',
+                tooltip: `Reject this change`,
+                command: 'clio.rejectEdit',
+                arguments: [filePath, index],
             });
-            codeLenses.push(undoLens);
-        }
+            codeLenses.push(rejectLens);
+        });
 
         return codeLenses;
     }

@@ -1,9 +1,11 @@
 """Tools for the AI agent."""
 import asyncio
 import subprocess
+import json
 from pathlib import Path
 from typing import Optional, Callable, Awaitable, Any
 import aiofiles
+import httpx
 from ..ide_bridge import get_bridge
 
 
@@ -18,12 +20,21 @@ class Tools:
         """Initialize tools."""
         self.permission_callback = permission_callback
         self.vscode_protocol = vscode_protocol
+        # Track pending edits for batching highlights
+        self.pending_highlights = {}  # file_path -> list of edit ranges
     
     async def request_permission(self, operation: str, details: str) -> bool:
         """Request permission for an operation."""
         if self.permission_callback:
             return await self.permission_callback(operation, details)
         return True  # Auto-approve if no callback
+
+    def clear_highlights(self, file_path: str = None) -> None:
+        """Clear pending highlights for a file (or all files if None)."""
+        if file_path:
+            self.pending_highlights.pop(str(Path(file_path).resolve()), None)
+        else:
+            self.pending_highlights.clear()
     
     async def read_file(self, path: str) -> str:
         """Read a file and return its contents."""
@@ -136,6 +147,7 @@ class Tools:
                 # First apply the edit to the file
                 new_content = content.replace(old_text, new_text, 1)
                 file_path = Path(path).resolve()
+                file_path_str = str(file_path)
                 async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                     await f.write(new_content)
 
@@ -143,9 +155,7 @@ class Tools:
                 import asyncio
                 await asyncio.sleep(0.1)
 
-                # Use the ORIGINAL position (lines_before from old_text) since the edit
-                # happens at the same line location. The line numbers don't shift for
-                # single-line replacements.
+                # Calculate line numbers based on NEW content (after previous edits)
                 newline_count = new_text.count('\n')
 
                 # Calculate end line and character
@@ -160,26 +170,24 @@ class Tools:
                     end_char_new = char_in_line + len(new_text)
                     end_line = lines_before
 
-                # Debug
-                with open("/tmp/clio_lines.txt", "w") as f:
-                    f.write(f"old_text: {repr(old_text[:100])}\n")
-                    f.write(f"new_text: {repr(new_text[:100])}\n")
-                    f.write(f"lines_before: {lines_before}\n")
-                    f.write(f"newline_count: {newline_count}\n")
-                    f.write(f"end_line: {end_line}\n")
-                    f.write(f"Will highlight lines {lines_before} to {end_line}\n")
+                # Add this edit to pending highlights
+                current_edit = {
+                    "range": {
+                        "start": {"line": lines_before, "character": max(0, char_in_line)},
+                        "end": {"line": end_line, "character": end_char_new}
+                    },
+                    "oldText": old_text,
+                    "newText": new_text
+                }
 
-                # Send proposeDiff with ORIGINAL line numbers (where old_text was)
+                if file_path_str not in self.pending_highlights:
+                    self.pending_highlights[file_path_str] = []
+                self.pending_highlights[file_path_str].append(current_edit)
+
+                # Send proposeDiff with ALL accumulated edits for this file
                 await bridge.propose_diff(
-                    file_path=str(file_path),
-                    edits=[{
-                        "range": {
-                            "start": {"line": lines_before, "character": max(0, char_in_line)},
-                            "end": {"line": end_line, "character": end_char_new}
-                        },
-                        "oldText": old_text,
-                        "newText": new_text
-                    }],
+                    file_path=file_path_str,
+                    edits=self.pending_highlights[file_path_str],
                     description=f"Edit {Path(path).name}"
                 )
                 return f"Successfully edited {path} (hover over green highlight to see changes, click Undo to revert)"
@@ -330,6 +338,178 @@ class Tools:
             return result
         except Exception as e:
             return f"Error finding files: {str(e)}"
+
+    async def web_search(self, query: str, num_results: int = 5) -> str:
+        """Search the web and return links and titles.
+
+        Args:
+            query: The search query
+            num_results: Number of results to return (default: 5, max: 10)
+        """
+        try:
+            num_results = min(num_results, 10)  # Cap at 10
+
+            # Use DuckDuckGo HTML search (no API key needed)
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                response = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": query},
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; CLIO/1.0)"}
+                )
+
+                if response.status_code != 200:
+                    return f"Error: Search failed with status {response.status_code}"
+
+                html = response.text
+
+                # Simple parsing of DuckDuckGo results
+                results = []
+                import re
+                from urllib.parse import urlparse, parse_qs
+
+                # Find result links and titles
+                pattern = r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>'
+                matches = re.findall(pattern, html, re.DOTALL)
+
+                for url, title in matches[:num_results]:
+                    # Clean up title (remove HTML tags)
+                    title = re.sub(r'<[^>]+>', '', title).strip()
+                    # Decode HTML entities
+                    import html as html_lib
+                    title = html_lib.unescape(title)
+                    url = html_lib.unescape(url)
+
+                    # Extract actual URL from DuckDuckGo redirect
+                    if 'duckduckgo.com/l/' in url:
+                        try:
+                            # Parse the redirect URL to extract the uddg parameter
+                            parsed = urlparse(url)
+                            params = parse_qs(parsed.query)
+                            if 'uddg' in params:
+                                url = params['uddg'][0]
+                        except:
+                            pass  # If extraction fails, use original URL
+
+                    # Ensure URL has protocol
+                    if url.startswith('//'):
+                        url = 'https:' + url
+                    elif not url.startswith(('http://', 'https://')):
+                        url = 'https://' + url
+
+                    results.append(f"[{title}]({url})")
+
+                if not results:
+                    return f"No search results found for: {query}"
+
+                return "\n".join([f"{i+1}. {r}" for i, r in enumerate(results)])
+
+        except Exception as e:
+            return f"Error searching web: {str(e)}"
+
+    async def web_fetch(self, url: str, question: str = "") -> str:
+        """Fetch content from a URL and optionally answer a question about it.
+
+        Args:
+            url: The URL to fetch
+            question: Optional question to answer about the page content
+        """
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                response = await client.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; CLIO/1.0)"}
+                )
+
+                # Report HTTP status like Claude Code
+                status_messages = {
+                    200: "200 OK",
+                    301: "301 Moved Permanently",
+                    302: "302 Found",
+                    404: "404 Not Found",
+                    403: "403 Forbidden",
+                    500: "500 Internal Server Error",
+                    503: "503 Service Unavailable"
+                }
+                status_msg = status_messages.get(response.status_code, f"{response.status_code}")
+
+                if response.status_code != 200:
+                    return f"HTTP {status_msg}\n\nFailed to fetch URL: {url}"
+
+                content_type = response.headers.get("content-type", "")
+
+                if "text/html" in content_type:
+                    # Parse HTML to text
+                    html = response.text
+
+                    # Simple HTML to text conversion
+                    import re
+                    # Remove script and style tags
+                    text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    # Remove HTML tags
+                    text = re.sub(r'<[^>]+>', ' ', text)
+                    # Decode HTML entities
+                    import html as html_lib
+                    text = html_lib.unescape(text)
+                    # Clean up whitespace
+                    text = re.sub(r'\s+', ' ', text).strip()
+
+                    # Truncate to 100KB
+                    max_length = 100_000
+                    if len(text) > max_length:
+                        text = text[:max_length] + "\n\n[Content truncated - exceeded 100KB]"
+
+                    # RAG-style structured format with strict grounding instructions
+                    result = f"""HTTP {status_msg}
+
+=== RETRIEVED SOURCE: {url} ===
+{text}
+=== END SOURCE ===
+
+CRITICAL GROUNDING RULES FOR THIS RESPONSE:
+- You MUST use ONLY the information in the source above
+- Every claim MUST include (Source: {url})
+- Quote directly when possible: "According to {url}, '[exact quote]'"
+- If information is NOT in the source, respond: "I couldn't find this information in the source"
+- NEVER add information from your training data or make assumptions"""
+
+                    if question:
+                        result += f"\n\nQuestion to answer using ONLY the source above: {question}"
+
+                    return result
+
+                elif "application/json" in content_type:
+                    # Return JSON formatted
+                    try:
+                        data = response.json()
+                        return f"""HTTP {status_msg}
+
+=== RETRIEVED SOURCE: {url} ===
+{json.dumps(data, indent=2)}
+=== END SOURCE ===
+
+CRITICAL GROUNDING RULES:
+- Use ONLY the JSON data above
+- Cite as: (Source: {url})
+- If data is missing, say "I couldn't find this in the source\""""
+                    except:
+                        return f"HTTP {status_msg}\n\nContent from {url}:\n\n{response.text}"
+
+                else:
+                    # Plain text or other
+                    text = response.text[:100_000]
+                    return f"""HTTP {status_msg}
+
+=== RETRIEVED SOURCE: {url} ===
+{text}
+=== END SOURCE ===
+
+CRITICAL GROUNDING RULES:
+- Use ONLY the content above
+- Cite as: (Source: {url})"""
+
+        except Exception as e:
+            return f"Error fetching URL: {str(e)}"
     
     def get_tool_definitions(self) -> list[dict]:
         """Get OpenAI function definitions for tools."""
@@ -489,6 +669,50 @@ class Tools:
                         }
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the web for information. Returns links and titles of search results. Use this when you need current information, documentation, or answers not in the codebase.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query (e.g., 'Python async best practices', 'React hooks tutorial')"
+                            },
+                            "num_results": {
+                                "type": "integer",
+                                "description": "Number of results to return (default: 5, max: 10)",
+                                "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "description": "Fetch and read content from a URL. Use this to read documentation, articles, or specific pages found via web_search.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The URL to fetch"
+                            },
+                            "question": {
+                                "type": "string",
+                                "description": "Optional question to answer about the page content",
+                                "default": ""
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                }
             }
         ]
     
@@ -508,5 +732,9 @@ class Tools:
             return await self.grep_files(**arguments)
         elif tool_name == "find_files":
             return await self.find_files(**arguments)
+        elif tool_name == "web_search":
+            return await self.web_search(**arguments)
+        elif tool_name == "web_fetch":
+            return await self.web_fetch(**arguments)
         else:
             return f"Error: Unknown tool: {tool_name}"

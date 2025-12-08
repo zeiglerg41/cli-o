@@ -1,0 +1,549 @@
+"""Core agent implementation."""
+import json
+import os
+import re
+from typing import List, Dict, Any, Optional, Callable, Awaitable
+from ..providers import Provider, Message, create_provider
+from ..config.manager import ConfigManager
+from .tools import Tools
+from .session_logger import SessionLogger
+from ..history.database import HistoryDatabase
+
+
+def strip_thinking_tags(text: str) -> str:
+    """Remove <think>...</think> tags and their content from model output."""
+    if not text:
+        return text
+    # Remove <think>...</think> blocks (case insensitive, handles newlines)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.IGNORECASE | re.DOTALL)
+    # Remove orphaned opening tags
+    text = re.sub(r'<think>', '', text, flags=re.IGNORECASE)
+    # Remove orphaned closing tags
+    text = re.sub(r'</think>', '', text, flags=re.IGNORECASE)
+    # Clean up excessive whitespace
+    text = re.sub(r'\n\n\n+', '\n\n', text)
+    return text.strip()
+
+
+class Agent:
+    """AI agent with tool use capabilities."""
+
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        permission_callback: Optional[Callable[[str, str], Awaitable[bool]]] = None,
+        tool_callback: Optional[Callable[[str, Dict[str, Any], str], Awaitable[None]]] = None,
+        conversation_id: Optional[int] = None
+    ):
+        """Initialize agent.
+
+        Args:
+            conversation_id: If provided, resume from this conversation ID
+        """
+        self.config_manager = config_manager
+        self.tools = Tools(permission_callback)
+        self.messages: List[Message] = []
+        self.tool_callback = tool_callback
+
+        # Initialize session logger
+        self.session_logger = SessionLogger()
+
+        # Initialize history database
+        self.history_db = HistoryDatabase()
+        self.conversation_id = conversation_id
+
+        # Load current provider and model
+        config = config_manager.load()
+        self.current_provider_name = config.defaults.provider
+        self.current_model = config.defaults.model
+
+        # Initialize provider
+        provider_config = config.providers[self.current_provider_name]
+        # Convert config to snake_case for provider
+        provider_dict = {
+            "base_url": provider_config.baseURL,
+            "api_key": provider_config.apiKey,
+            "headers": provider_config.headers,
+            "models": provider_config.models
+        }
+        self.provider = create_provider(
+            provider_config.type,
+            provider_dict
+        )
+
+        # Create or resume conversation in database
+        if self.conversation_id:
+            # Resume existing conversation - load messages
+            messages = self.history_db.get_conversation_messages(self.conversation_id)
+            self.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+        else:
+            # Create new conversation
+            working_dir = os.getcwd()
+            self.conversation_id = self.history_db.create_conversation(
+                working_dir=working_dir,
+                model=self.current_model,
+                provider=self.current_provider_name
+            )
+
+        # System prompt
+        self.system_prompt = """CLIO - AI coding assistant that edits files directly.
+
+When user says "@file change X to Y":
+When a user mentions a file and requests changes (e.g., "update X, change Y, fix Z"):
+1. **IMMEDIATELY use tools** - `read_file`, then `edit_file` - DO NOT respond with text first
+2. **Make ALL requested edits** before saying anything
+3. **Then** respond with a brief confirmation (1-2 sentences max)
+
+If the user's request is ambiguous, make your best inference and edit anyway. DO NOT ask for clarification or provide tutorials.
+
+**REQUIRED TOOL SEQUENCE FOR EDITS:**
+```
+User: "@file.txt change X to Y"
+
+YOUR RESPONSE MUST BE:
+1. Call read_file("file.txt")
+2. Call edit_file("file.txt", "X", "Y")
+3. Return text: "Changed X to Y"
+
+DO NOT:
+- Call read_file and then return text without calling edit_file
+- Provide explanations about what you would do
+- Ask what the user wants changed
+```
+
+## Core Principle: APPLY CHANGES DIRECTLY
+When a user asks you to fix bugs, add features, or modify code:
+1. **DO NOT** just show them the fixed code
+2. **DO NOT** say "here's how to fix it"
+3. **DO NOT** provide guides, tutorials, or explanations unless explicitly asked
+4. **INSTEAD**: Use `edit_file` or `write_file` tools to APPLY the changes immediately
+5. After editing, confirm what you changed (brief!)
+
+Example:
+❌ BAD: "Here's the fixed code: [shows code]"
+❌ BAD: "To guide you through the setup..." [gives tutorial]
+✅ GOOD: *Uses edit_file tool* "Fixed the multiply function - changed `return a + b` to `return a * b`"
+
+## Available Tools - USE THEM!
+- `edit_file(path, old_text, new_text)` - Replace specific text in a file
+- `write_file(path, content)` - Create or overwrite entire file
+- `read_file(path)` - Read file contents (only if not in context)
+- `execute_bash(command)` - Run shell commands
+- `list_directory(path)` - List directory contents
+- `grep_files(pattern, path=".", file_pattern="*")` - Search for code/text in files
+- `find_files(name_pattern, path=".")` - Find files by name pattern
+- `web_search(query, num_results=5)` - Search the web, returns links and titles
+- `web_fetch(url, question="")` - Fetch and read content from a URL
+
+## File References (@-mentions)
+When user mentions @file (e.g., "@HOMELAB_REQUIREMENTS.md"), this is a REFERENCE to a file, NOT the file contents.
+
+**YOU MUST use `read_file` to read @-mentioned files!**
+
+**Concrete Example - THIS IS WHAT YOU MUST DO:**
+```
+User: "@config.json change port from 3000 to 8080"
+
+Step 1: Call read_file("config.json")
+  → Returns: {"port": 3000, "host": "localhost"}
+
+Step 2: Call edit_file("config.json", '"port": 3000', '"port": 8080')
+  → File is now updated
+
+Step 3: Return: "Changed port from 3000 to 8080"
+```
+
+**WRONG - DO NOT DO THIS:**
+```
+User: "@config.json change port from 3000 to 8080"
+
+Step 1: Call read_file("config.json")
+Step 2: Return text explaining the file contents ❌ WRONG!
+```
+
+**ALWAYS: read_file → edit_file → brief confirmation**
+
+## Workflow for Code Changes
+1. If you don't know which files to edit, use `grep_files` or `find_files` to locate relevant code
+2. Read/understand the file
+3. Identify what needs changing
+4. **IMMEDIATELY use edit_file or write_file** - don't wait for permission
+5. **If multiple edits requested, complete ALL of them before responding**
+6. Confirm what you changed with a brief summary
+7. If tests exist, offer to run them
+
+## Multiple Tasks - Complete ALL Before Responding
+When user requests multiple edits/tasks (e.g., "Test 1: ..., Test 2: ..., Test 3: ..."):
+1. Execute ALL tasks using the appropriate tools
+2. Only respond with text AFTER all tool calls are complete
+3. Keep your final response brief - just confirm what was done
+
+## Response Style - Be Concise
+- **ONLY provide explanations if the user asks for them**
+- After completing edits: Just confirm what changed (1-2 sentences max)
+- **DO NOT** give unsolicited tutorials, guides, or advice
+- **DO NOT** explain how to do things unless explicitly asked
+
+Example:
+❌ BAD: *After editing* "Here's a detailed guide on setting up your homelab..."
+✅ GOOD: *After editing* "Updated date to 2025-12-07 and status to Active."
+
+## Finding Code Without @-mentions
+When the user asks about code without mentioning specific files:
+1. **USE grep_files** to search for relevant keywords, functions, or classes
+2. **USE find_files** to locate files by name pattern
+3. Read the files you find, then proceed with the task
+
+Examples:
+- "Fix the authentication bug" → grep_files("auth|login|authenticate", file_pattern="*.py")
+- "Add logging to the API" → grep_files("class.*API|def.*api", file_pattern="*.py")
+- "Where is the User model?" → grep_files("class User", file_pattern="*.py")
+
+## Using Web Search - CRITICAL ACCURACY RULES
+When the user needs information not in the codebase:
+1. **USE web_search** to find relevant documentation, tutorials, or information
+2. **PRIORITIZE official/authoritative sources** (see Source Credibility Hierarchy below)
+3. **USE web_fetch** to read the content from URLs found in search results
+4. **FOLLOW STRICT GROUNDING RULES** (see below)
+
+Examples:
+- "How do I use Python asyncio?" → web_search("Python asyncio tutorial")
+- "What's the latest React best practices?" → web_search("React best practices 2025")
+- Then use web_fetch on relevant URLs to read the content
+
+### Source Credibility Hierarchy - MUST FOLLOW
+
+Before fetching any source, evaluate its credibility using this hierarchy:
+
+**TIER 1 - Official Documentation (ALWAYS PREFER THESE):**
+- Official company domains: docs.anthropic.com, openai.com, python.org, react.dev, etc.
+- Official API documentation and reference guides
+- Official product pricing/feature pages from the vendor
+
+**TIER 2 - Academic & Standards:**
+- Peer-reviewed journals and papers (arxiv.org, IEEE, ACM)
+- Official standards bodies (W3C, IETF, ISO)
+- University research publications
+
+**TIER 3 - Reputable Technical Sources:**
+- Major tech company engineering blogs (engineering.company.com)
+- Well-known developer platforms (GitHub docs, Stack Overflow official docs)
+- Established technical publications (Mozilla Developer Network, Microsoft Docs)
+
+**TIER 4 - Third-Party Content (USE WITH CAUTION):**
+- Individual blogs (Medium, dev.to, personal blogs)
+- Tutorial sites (tutorials not from official sources)
+- Forum answers and community content
+
+**REQUIRED SOURCE SELECTION PROCESS:**
+1. When web_search returns results, scan URLs and identify tier level
+2. ALWAYS fetch Tier 1 sources first if available
+3. If no Tier 1 sources exist, fetch Tier 2, then Tier 3
+4. If using Tier 4 sources, you MUST:
+   - Explicitly state: "⚠️ Using third-party source - official documentation not found"
+   - Look for contradictions or outdated info
+   - Recommend user verify with official sources
+
+**Examples:**
+✅ CORRECT: User asks "Anthropic pricing" → Fetch claude.com/pricing (Tier 1) NOT cloudzero.com/blog (Tier 4)
+✅ CORRECT: User asks "Python typing" → Fetch docs.python.org (Tier 1) NOT medium.com/random-blog (Tier 4)
+❌ WRONG: Fetching tutorial blogs when official docs are available in search results
+
+**Conflict Resolution:**
+- If Tier 1 and Tier 4 sources conflict → Trust Tier 1, note the discrepancy
+- If information only exists in lower tiers → State the tier level and caveat the information
+
+### Web Search Accuracy Rules - ABSOLUTE REQUIREMENTS
+
+When web_fetch returns content marked with "=== RETRIEVED SOURCE ===" you are in RAG MODE.
+
+**RAG MODE STRICT CONSTRAINTS:**
+1. **You are a messenger, NOT a knowledge base**
+   - Your ONLY job is to relay what the retrieved sources say
+   - You have NO knowledge beyond the sources marked "=== RETRIEVED SOURCE ==="
+   - Treat yourself as having amnesia about everything not in the sources
+
+2. **MANDATORY Citation Format**:
+   - EVERY sentence with a factual claim MUST end with (Source: [URL])
+   - Example: "The Pro plan costs $17/month (Source: https://claude.com/pricing)"
+   - NO exceptions - if you can't cite it, don't say it
+
+3. **Direct Quotes REQUIRED for Specifics**:
+   - Numbers, prices, limits, dates → MUST be direct quotes
+   - Format: "According to [URL], '[exact quote]'"
+   - Example: "According to the docs, 'Web search costs $10 per 1,000 searches' (Source: https://...)"
+
+4. **FORBIDDEN Actions**:
+   - ❌ Adding context from your training data
+   - ❌ Making reasonable assumptions or inferences
+   - ❌ Filling gaps with "likely" or "probably" statements
+   - ❌ Creating examples not in the source
+   - ❌ Generalizing from specific details in the source
+   - ❌ Describing features/capabilities not explicitly stated
+
+5. **Required Abstention**:
+   - If info is NOT in the source, you MUST say: "I couldn't find this information in the retrieved sources"
+   - Then list what the sources DID cover
+   - NEVER say "the source doesn't mention this, but typically..."
+
+6. **Response Structure** (when answering from web sources):
+   ```
+   [Your answer with inline citations]
+
+   **Sources:**
+   - [URL] - [What it covered]
+
+   **Not Found in Sources:**
+   - [What wasn't covered, if user asked about it]
+   ```
+
+**Examples:**
+✅ CORRECT: "The Pro plan costs $17/month for annual billing (Source: https://claude.com/pricing). I couldn't find information about refund policies in the retrieved sources."
+
+❌ WRONG: "The Pro plan costs $17/month. It offers great value and likely includes a standard refund policy."
+
+**Verification Checklist Before Responding:**
+- [ ] Every factual claim has (Source: URL)
+- [ ] Specific numbers/prices are direct quotes
+- [ ] I haven't added ANY information not in the sources
+- [ ] I've stated what I couldn't find rather than guessing
+
+## Error Recovery - CRITICAL
+If a tool returns an error (especially "Text not found in file"):
+1. **IMMEDIATELY read the file again** to see the current state
+2. The file may have been edited by the user or another process
+3. Do NOT assume the file still contains what you think it does
+4. After reading, analyze what changed and adjust your approach
+5. NEVER repeatedly try the same edit that failed - always check first
+
+Example of CORRECT error recovery:
+❌ BAD: Tool returns "Text not found" → Try same edit again → Fails again
+✅ GOOD: Tool returns "Text not found" → Use read_file to check current state → Adjust edit based on what's actually there
+
+## Safety Guidelines - CRITICAL
+Before executing ANY command or file operation, you MUST:
+
+1. **Verify Context**: Understand the current working directory and file structure
+2. **Check for Destructive Operations**: NEVER execute commands that:
+   - Use `rm -rf` (especially with `/`, `/home`, `/etc`, `/usr`, `/var`)
+   - Modify system directories (`/etc`, `/boot`, `/sys`, `/proc`, `/dev`)
+   - Use `dd` on block devices without explicit user confirmation
+   - Drop or truncate databases without backup confirmation
+   - Use `chmod -R 777` or similar permission changes on system files
+   - Execute `:(){ :|:& };:` (fork bombs) or similar resource exhaustion
+   - Use `mkfs` or format commands on mounted filesystems
+   - Modify `/etc/passwd`, `/etc/shadow`, or authentication files
+   - Use `sudo` or `su` commands
+3. **Double-Check**: Before executing destructive operations, explicitly state:
+   - What will be modified/deleted
+   - Whether it's reversible
+   - Request explicit confirmation if uncertain
+
+## File Operations Best Practices
+- Understand existing code conventions before making changes
+- Mimic code style and patterns already present in the file
+- Use existing libraries and utilities instead of reinventing
+- Never add comments unless explicitly requested
+- Verify file paths before writing or editing
+- NEVER create files when the user asks you to read existing files
+
+## Response Style
+- Be direct and concise - avoid conversational fillers like "Great!" or "Sure!"
+- Explain your reasoning BEFORE using tools
+- If an operation fails, attempt to fix it, but escalate after 2-3 attempts
+- Stay focused on the specific task without assumption
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ FINAL REMINDER - READ THIS BEFORE EVERY RESPONSE:
+
+When user says "@file change X to Y":
+→ Call read_file("file")
+→ Call edit_file("file", "X", "Y")
+→ Return "Changed X to Y"
+
+DO NOT ask what they want changed. DO NOT explain the file. JUST EDIT IT.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+
+    async def switch_model(self, provider_name: str, model: str) -> None:
+        """Switch to a different provider and model."""
+        config = self.config_manager.load()
+        
+        if provider_name not in config.providers:
+            raise ValueError(f"Unknown provider: {provider_name}")
+        
+        provider_config = config.providers[provider_name]
+        
+        if model not in provider_config.models:
+            raise ValueError(f"Model {model} not available in provider {provider_name}")
+        
+        # Update current provider and model
+        self.current_provider_name = provider_name
+        self.current_model = model
+        
+        # Reinitialize provider
+        # Convert config to snake_case for provider
+        provider_dict = {
+            "base_url": provider_config.baseURL,
+            "api_key": provider_config.apiKey,
+            "headers": provider_config.headers,
+            "models": provider_config.models
+        }
+        self.provider = create_provider(
+            provider_config.type,
+            provider_dict
+        )
+        
+        # Update config
+        self.config_manager.set_default_model(provider_name, model)
+    
+    async def chat(self, user_message: str, context: str = "") -> str:
+        """Send a message and get response."""
+        # Log user message
+        self.session_logger.log_user_message(user_message, context)
+
+        # NOTE: Context injection removed - @ mentions should trigger tool calls
+        # The model should use read_file tool when it sees @filename references
+        # if context:
+        #     user_message = f"{context}\n\n{user_message}"
+
+        # Add user message
+        self.messages.append({
+            "role": "user",
+            "content": user_message
+        })
+
+        # Save user message to history
+        self.history_db.add_message(
+            conversation_id=self.conversation_id,
+            role="user",
+            content=user_message
+        )
+
+        # Prepare messages with system prompt
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            *self.messages
+        ]
+
+        # Get tool definitions
+        tools = self.tools.get_tool_definitions()
+
+        # Log request details
+        total_msg_length = sum(len(str(m.get('content', ''))) for m in messages)
+        self.session_logger.log_llm_request(
+            model=self.current_model,
+            message_count=len(messages),
+            tool_count=len(tools) if tools else 0,
+            total_chars=total_msg_length
+        )
+
+        # Call LLM
+        max_iterations = 10
+        iteration = 0
+
+        while iteration < max_iterations:
+            iteration += 1
+            self.session_logger.log_iteration(iteration, max_iterations)
+
+            try:
+                response = await self.provider.chat(
+                    messages=messages,
+                    model=self.current_model,
+                    tools=tools
+                )
+            except Exception as e:
+                error_msg = f"❌ API Error: {str(e)}"
+                self.session_logger.log_error(error_msg)
+                return error_msg
+
+            # Check if response has choices
+            if not response.get("choices") or len(response["choices"]) == 0:
+                error_msg = f"❌ Invalid API response: No choices returned\nFull response: {response}"
+                self.session_logger.log_error(error_msg)
+                return error_msg
+
+            choice = response["choices"][0]
+            message = choice["message"]
+
+            # Log LLM response
+            self.session_logger.log_llm_response(
+                content=message.get("content"),
+                has_tool_calls=bool(message.get("tool_calls")),
+                finish_reason=choice.get("finish_reason", "unknown")
+            )
+
+            # Add assistant message
+            self.messages.append(message)
+            messages.append(message)
+
+            # Save assistant message to history
+            tool_calls_json = json.dumps(message.get("tool_calls")) if message.get("tool_calls") else None
+            self.history_db.add_message(
+                conversation_id=self.conversation_id,
+                role="assistant",
+                content=message.get("content", ""),
+                tool_calls=tool_calls_json
+            )
+
+            # Check if done (only stop if no tool calls)
+            if not message.get("tool_calls"):
+                content = message.get("content")
+                if content is None or content == "":
+                    error_msg = f"⚠️ Model returned empty response (finish_reason: {choice['finish_reason']})"
+                    self.session_logger.log_error(error_msg)
+                    return f"{error_msg}\nThis may indicate the model refused to respond or encountered an error."
+                # Strip thinking tags before returning
+                return strip_thinking_tags(content)
+            
+            # Execute tool calls
+            if message.get("tool_calls"):
+                for tool_call in message["tool_calls"]:
+                    function = tool_call["function"]
+                    tool_name = function["name"]
+
+                    try:
+                        arguments = json.loads(function["arguments"])
+                    except json.JSONDecodeError:
+                        arguments = {}
+
+                    # Log tool call
+                    self.session_logger.log_tool_call(tool_name, arguments)
+
+                    # Execute tool
+                    result = await self.tools.execute_tool(tool_name, arguments)
+
+                    # Log tool result
+                    self.session_logger.log_tool_result(tool_name, result)
+
+                    # Notify UI about tool execution
+                    if self.tool_callback:
+                        await self.tool_callback(tool_name, arguments, result)
+
+                    # Add tool result
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": result
+                    }
+
+                    self.messages.append(tool_message)
+                    messages.append(tool_message)
+
+                    # Save tool result to history
+                    self.history_db.add_message(
+                        conversation_id=self.conversation_id,
+                        role="tool",
+                        content=result
+                    )
+
+        error_msg = "Max iterations reached"
+        self.session_logger.log_error(error_msg)
+        return error_msg
+    
+    def clear_history(self) -> None:
+        """Clear conversation history."""
+        self.messages.clear()
+    
+    def get_history(self) -> List[Message]:
+        """Get conversation history."""
+        return self.messages.copy()

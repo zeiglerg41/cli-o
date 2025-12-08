@@ -149,6 +149,80 @@ export class DiffDecorator {
     }
 
     /**
+     * Accept a single edit (remove its highlighting)
+     */
+    async acceptEdit(file: string, editIndex: number): Promise<boolean> {
+        const pending = this.pendingDiffs.get(file);
+        if (!pending || editIndex < 0 || editIndex >= pending.edits.length) {
+            return false;
+        }
+
+        // Remove this edit from the list
+        pending.edits.splice(editIndex, 1);
+
+        // If no edits left, clear completely
+        if (pending.edits.length === 0) {
+            return await this.clearDiff(file);
+        }
+
+        // Otherwise, re-render with remaining edits
+        await this.showDiff(file, pending.edits, pending.description);
+        return true;
+    }
+
+    /**
+     * Reject a single edit (undo just this change)
+     */
+    async rejectEdit(file: string, editIndex: number): Promise<boolean> {
+        const pending = this.pendingDiffs.get(file);
+        if (!pending || editIndex < 0 || editIndex >= pending.edits.length) {
+            return false;
+        }
+
+        const uri = vscode.Uri.file(file);
+        const document = await vscode.workspace.openTextDocument(uri);
+        const editor = await vscode.window.showTextDocument(document);
+
+        const edit = pending.edits[editIndex];
+
+        // Create a WorkspaceEdit to replace the new text back to old text
+        const workspaceEdit = new vscode.WorkspaceEdit();
+        const range = new vscode.Range(
+            new vscode.Position(edit.range.start.line, edit.range.start.character),
+            new vscode.Position(edit.range.end.line, edit.range.end.character)
+        );
+
+        workspaceEdit.replace(uri, range, edit.oldText);
+        await vscode.workspace.applyEdit(workspaceEdit);
+
+        // Remove this edit from the list
+        pending.edits.splice(editIndex, 1);
+
+        // If no edits left, clear completely
+        if (pending.edits.length === 0) {
+            return await this.clearDiff(file);
+        }
+
+        // Otherwise, re-render with remaining edits
+        await this.showDiff(file, pending.edits, pending.description);
+        return true;
+    }
+
+    /**
+     * Accept all edits (just clear highlights)
+     */
+    async acceptAllEdits(file: string): Promise<boolean> {
+        return await this.clearDiff(file);
+    }
+
+    /**
+     * Reject all edits (undo all changes)
+     */
+    async rejectAllEdits(file: string): Promise<boolean> {
+        return await this.undoDiff(file);
+    }
+
+    /**
      * Dispose all decorations
      */
     dispose(): void {
