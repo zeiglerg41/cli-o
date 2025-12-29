@@ -1,0 +1,65 @@
+{
+  "providers": {
+    "openai": {
+      "type": "openai",
+      "baseURL": "https://api.openai.com/v1",
+      "apiKey": "sk-YOUR_OPENAI_API_KEY_HERE",
+      "headers": null,
+      "models": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo"
+      ],
+      "hostname": "OpenAI"
+    },
+    "anthropic": {
+      "type": "anthropic",
+      "baseURL": null,
+      "apiKey": "sk-ant-YOUR_ANTHROPIC_API_KEY_HERE",
+      "headers": null,
+      "models": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-opus-20240229"
+      ],
+      "hostname": "Anthropic"
+    },
+    "openwebui-vps": {
+      "type": "openai-compatible",
+      "baseURL": "https://open-webui-remote-1.tech/api",
+      "apiKey": "sk-6488eea7cae54966b0560de66de6a9aa",
+      "headers": null,
+      "models": [
+        "llama3.1:8b",
+        "qwen2.5:7b",
+        "qwen2.5:3b",
+        "mistral:7b",
+        "gemma2:2b"
+      ],
+      "hostname": "VPS (open-webui-remote-1.tech)"
+    },
+    "desktop-ollama": {
+      "type": "openai-compatible",
+      "baseURL": "http://100.75.184.45:11434/v1",
+      "apiKey": "not-needed",
+      "headers": null,
+      "models": [
+        "qwen3-8b-clio",
+        "qwen3:8b",
+        "llama3.1:8b"
+      ],
+      "hostname": "Desktop WSL (100.75.184.45)"
+    }
+  },
+  "defaults": {
+    "provider": "desktop-ollama",
+    "model": "qwen3-8b-clio"
+  },
+  "preferences": {
+    "auto_approve": false,
+    "context_window": 16384,
+    "theme": "dark",
+    "show_thinking": true
+  }
+}

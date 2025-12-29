@@ -1,8 +1,8 @@
 # Claude Clone
 
-**Claude Clone** is a powerful, self-hosted AI coding assistant that runs in your terminal. It mimics the functionality of advanced AI assistants like Claude, allowing you to bring your own models, connect to any OpenAI-compatible API, and interact with your local filesystem seamlessly.
+**Claude Clone** provides a robust, self-contained AI coding helper that operates in your terminal. It replicates the abilities of sophisticated AI helpers similar to Claude, enabling you to integrate your own models, link with any OpenAI-compatible API, and engage effortlessly with your local file system.
 
-This project is built with Python using the **Textual** framework for the UI and provides a rich, interactive experience directly in your terminal.
+Developed with Python and leveraging the **Textual** framework for the user interface, this project ensures a vibrant, engaging experience directly within your terminal.
 
 ![Chat Interface](https://user-images.githubusercontent.com/1234/claude-clone-demo.png) <!--- Placeholder for a future screenshot -->
 

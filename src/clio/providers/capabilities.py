@@ -1,0 +1,129 @@
+"""Provider capability detection for tool calling support.
+
+This module tracks which models support tool calling across different providers.
+"""
+
+from typing import Dict, Set
+
+# Tool calling support matrix
+# Models are lowercase for case-insensitive matching
+TOOL_SUPPORT_MATRIX: Dict[str, Dict[str, bool]] = {
+    "openai": {
+        # GPT-4 family
+        "gpt-4": True,
+        "gpt-4-turbo": True,
+        "gpt-4-turbo-preview": True,
+        "gpt-4o": True,
+        "gpt-4o-mini": True,
+
+        # GPT-3.5 family (0613+)
+        "gpt-3.5-turbo": True,
+        "gpt-3.5-turbo-0613": True,
+        "gpt-3.5-turbo-1106": True,
+        "gpt-3.5-turbo-0125": True,
+
+        # o1 models (limited support)
+        "o1": True,
+        "o1-preview": True,
+        "o1-mini": True,
+        "o3": True,
+        "o3-mini": True,
+        "o4-mini": True,
+    },
+    "anthropic": {
+        # Claude 3.5 family
+        "claude-3-5-sonnet": True,
+        "claude-3-5-sonnet-20241022": True,
+        "claude-3-5-haiku": True,
+        "claude-3-5-haiku-20241022": True,
+
+        # Claude 3 family
+        "claude-3-opus": True,
+        "claude-3-opus-20240229": True,
+        "claude-3-sonnet": True,
+        "claude-3-sonnet-20240229": True,
+        "claude-3-haiku": True,
+        "claude-3-haiku-20240307": True,
+    },
+    "ollama": {
+        # Open source models with tool support
+        "llama3.1": True,
+        "llama3.1:8b": True,
+        "llama3.1:70b": True,
+        "llama3.1:405b": True,
+        "mistral-nemo": True,
+        "firefunction-v2": True,
+        "command-r-plus": True,
+        "command-r": True,
+    }
+}
+
+
+def supports_tools(provider: str, model: str) -> bool:
+    """Check if a model supports tool calling.
+
+    Uses exact matching and prefix matching to handle model variants
+    (e.g., "gpt-4-turbo-2024-04-09" matches "gpt-4-turbo").
+
+    Args:
+        provider: Provider type ("openai", "anthropic", "ollama")
+        model: Model name to check
+
+    Returns:
+        True if model supports tool calling, False otherwise
+
+    Examples:
+        >>> supports_tools("openai", "gpt-4o")
+        True
+        >>> supports_tools("openai", "gpt-4o-2024-05-13")
+        True
+        >>> supports_tools("openai", "gpt-3.5")
+        False
+        >>> supports_tools("anthropic", "claude-3-5-sonnet-20241022")
+        True
+        >>> supports_tools("ollama", "llama2")
+        False
+    """
+    provider_lower = provider.lower()
+
+    if provider_lower not in TOOL_SUPPORT_MATRIX:
+        return False
+
+    model_lower = model.lower()
+    supported_models = TOOL_SUPPORT_MATRIX[provider_lower]
+
+    # Exact match
+    if model_lower in supported_models:
+        return supported_models[model_lower]
+
+    # Prefix match (e.g., "gpt-4-turbo-2024-04-09" matches "gpt-4-turbo")
+    for supported_model in supported_models:
+        if model_lower.startswith(supported_model):
+            return supported_models[supported_model]
+
+    return False
+
+
+def get_supported_models(provider: str) -> Set[str]:
+    """Get set of model prefixes that support tools for a provider.
+
+    Args:
+        provider: Provider type ("openai", "anthropic", "ollama")
+
+    Returns:
+        Set of supported model name prefixes
+
+    Example:
+        >>> sorted(list(get_supported_models("openai")))[:3]
+        ['gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo']
+    """
+    provider_lower = provider.lower()
+
+    if provider_lower not in TOOL_SUPPORT_MATRIX:
+        return set()
+
+    return {
+        model
+        for model, supported in TOOL_SUPPORT_MATRIX[provider_lower].items()
+        if supported
+    }

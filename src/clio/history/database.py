@@ -94,19 +94,23 @@ class HistoryDatabase:
         self.conn.commit()
         return cursor.lastrowid
 
-    def add_message(self, conversation_id: int, role: str, content: str,
+    def add_message(self, conversation_id: int, role: str, content: Optional[str] = None,
                     tool_calls: Optional[str] = None, tokens: Optional[int] = None):
         """Add a message to a conversation.
 
         Args:
             conversation_id: ID of the conversation
             role: Message role (user/assistant/system/tool)
-            content: Message content
+            content: Message content (defaults to empty string if None)
             tool_calls: JSON string of tool calls if any
             tokens: Token count if available
         """
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
+
+        # Default to empty string if content is None (e.g., when only tool calls present)
+        if content is None:
+            content = ""
 
         cursor.execute("""
             INSERT INTO messages (conversation_id, timestamp, role, content, tool_calls, tokens)

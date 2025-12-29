@@ -440,9 +440,24 @@ class ChatApp(App):
         return self.context_manager.remove_file(args.strip())
     
     def _cmd_config(self, args: str) -> str:
-        """Show config."""
-        config = self.config_manager.load()
-        return f"**Configuration:**\n\nConfig file: {self.config_manager.config_path}\n\n{config.model_dump_json(indent=2)}"
+        """Open config file in editor."""
+        import subprocess
+        import os
+
+        # Get editor from environment or use fallback
+        editor = os.environ.get('EDITOR') or os.environ.get('VISUAL') or 'nano'
+
+        # Get config path
+        config_path = str(self.config_manager.config_path)
+
+        try:
+            # Suspend Textual, run editor, then resume
+            with self.suspend():
+                subprocess.run([editor, config_path])
+
+            return f"✓ Config file edited: {config_path}\n\nRestart clio for changes to take effect."
+        except Exception as e:
+            return f"❌ Failed to open editor: {e}\n\nYou can manually edit: {config_path}"
 
     def _cmd_copy(self, args: str) -> str:
         """Copy last assistant response to clipboard."""
@@ -674,6 +689,10 @@ class ChatApp(App):
         chat_input = self.query_one("#chat-input", AutocompleteTextArea)
         autocomplete = self.query_one("#autocomplete-overlay", AutocompleteOverlay)
 
+        # Save trigger before hiding (hide() sets it to None)
+        trigger = autocomplete.current_trigger
+        self._debug_log(f"🔍 Saved trigger before hide: '{trigger}'")
+
         # Apply completion
         completion = autocomplete.get_selected_completion()
         self._debug_log(f"🔍 Completion selected: {completion}")
@@ -695,6 +714,18 @@ class ChatApp(App):
 
         autocomplete.hide()
         chat_input.autocomplete_visible = False
+
+        # If Enter was pressed on a slash command, submit it immediately
+        self._debug_log(f"🔍 Checking auto-submit: key={message.key}, trigger={trigger}")
+        if message.key == "enter" and trigger == "/":
+            self._debug_log(f"🔍 Enter pressed on slash command, auto-submitting")
+            user_input = chat_input.text.strip()
+            self._debug_log(f"🔍 user_input for submit: '{user_input}'")
+            if user_input:
+                chat_input.clear()
+                await self._process_message(user_input)
+            else:
+                self._debug_log(f"🔍 Empty input, not submitting")
 
     async def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Handle text changes for autocomplete."""
@@ -842,6 +873,14 @@ class ChatApp(App):
                 else:
                     self._debug_log(f"🔍 DEBUG: No completion selected!")
                 autocomplete.hide()
+
+                # If Enter was pressed on a slash command completion, submit it
+                if event.key == "enter" and autocomplete.current_trigger == "/":
+                    user_input = chat_input.text.strip()
+                    if user_input:
+                        chat_input.clear()
+                        await self._process_message(user_input)
+
                 event.prevent_default()
                 event.stop()
                 return
@@ -854,9 +893,12 @@ class ChatApp(App):
 
         # Submit on Enter (Shift+Enter for newline)
         if event.key == "enter" and not event.shift:
+            self._debug_log(f"🔍 ENTER KEY PRESSED (not in autocomplete)")
             user_input = chat_input.text.strip()
+            self._debug_log(f"🔍 user_input = '{user_input}'")
 
             if not user_input:
+                self._debug_log(f"🔍 Empty input, returning")
                 return
 
             # Add to command history
@@ -870,8 +912,10 @@ class ChatApp(App):
             # Clear input
             chat_input.clear()
 
+            self._debug_log(f"🔍 About to call _process_message with: '{user_input}'")
             # Process the message
             await self._process_message(user_input)
+            self._debug_log(f"🔍 _process_message completed")
             event.prevent_default()
             event.stop()
             return
@@ -905,6 +949,7 @@ class ChatApp(App):
 
     async def _process_message(self, user_input: str) -> None:
         """Process and send a user message."""
+        self._debug_log(f"🔍 _process_message called with: '{user_input}'")
 
         # Show user message
         chat_log = self.query_one("#chat-log", RichLog)
@@ -912,6 +957,7 @@ class ChatApp(App):
 
         # Parse command or message
         command, args, original = self.command_router.parse(user_input)
+        self._debug_log(f"🔍 Parsed: command='{command}', args='{args}', original='{original}'")
 
         # Special handling for /web - convert to normal message flow
         actual_message = user_input
@@ -924,8 +970,10 @@ class ChatApp(App):
         self.conversation_history.append({"role": "user", "content": actual_message})
 
         if command:
+            self._debug_log(f"🔍 Executing command: {command} with args: {args}")
             # Execute command
             result = await self.command_router.execute(command, args)
+            self._debug_log(f"🔍 Command result: {result[:100]}...")
             chat_log.write(self._create_panel(Markdown(result), title="[bold purple]System[/bold purple]", border_style="purple"))
 
             # Add system message to history
@@ -1017,16 +1065,10 @@ class ChatApp(App):
         else:
             tool_display = f"🔧 **{tool_name}**: {arguments}"
 
-        # Show result
-        result_preview = result[:200] + "..." if len(result) > 200 else result
-
-        # Create panel with tool execution info
-        tool_info = f"{tool_display}\n\n**Result:**\n{result_preview}"
-        chat_log.write(self._create_panel(
-            Markdown(tool_info),
-            title="[bold blue]Tool Execution[/bold blue]",
-            border_style="blue"
-        ))
+        # Show tool call as a simple line (like Claude Code)
+        from rich.text import Text
+        tool_line = Text(tool_display, style="dim cyan")
+        chat_log.write(tool_line)
     
     def action_clear(self) -> None:
         """Clear chat log."""

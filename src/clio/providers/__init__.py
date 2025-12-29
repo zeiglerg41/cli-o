@@ -2,10 +2,22 @@
 from typing import Dict, Any
 from .base import Provider, Message
 from .openai_compatible import OpenAICompatibleProvider
+from .anthropic import AnthropicProvider
 
 
 def create_provider(provider_type: str, config: Dict[str, Any]) -> Provider:
-    """Create provider instance based on type."""
+    """Create provider instance based on type.
+
+    Args:
+        provider_type: Type of provider ("openai", "openai-compatible", "anthropic")
+        config: Provider configuration dict
+
+    Returns:
+        Provider instance
+
+    Raises:
+        ValueError: If provider_type is unknown
+    """
     if provider_type == "openai-compatible":
         return OpenAICompatibleProvider(config)
     elif provider_type == "openai":
@@ -14,8 +26,7 @@ def create_provider(provider_type: str, config: Dict[str, Any]) -> Provider:
             config["base_url"] = "https://api.openai.com/v1"
         return OpenAICompatibleProvider(config)
     elif provider_type == "anthropic":
-        # TODO: Implement Anthropic provider
-        raise NotImplementedError("Anthropic provider not yet implemented")
+        return AnthropicProvider(config)
     else:
         raise ValueError(f"Unknown provider type: {provider_type}")
 

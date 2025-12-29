@@ -2,7 +2,11 @@
 from typing import AsyncIterator, Dict, Any, List, Optional
 from openai import AsyncOpenAI
 import httpx
+import json as json_module
+
 from .base import Provider, Message
+from .schemas import ToolDefinition, ToolCall, ToolResult
+from .capabilities import supports_tools as check_tool_support
 
 
 class OpenAICompatibleProvider(Provider):
@@ -187,3 +191,77 @@ class OpenAICompatibleProvider(Provider):
         """List available models."""
         # Return models from config since not all APIs support listing
         return self.config.get("models", [])
+
+    def supports_tools(self, model: str) -> bool:
+        """Check if model supports tool calling.
+
+        Uses capability detection for OpenAI/Ollama models.
+        """
+        # Determine provider type based on base_url
+        provider_type = "openai"  # Default to openai
+        if self.is_openwebui or "ollama" in self.config.get("base_url", "").lower():
+            provider_type = "ollama"
+
+        return check_tool_support(provider_type, model)
+
+    def format_tools_for_api(self, tools: List[ToolDefinition]) -> List[Dict[str, Any]]:
+        """Convert canonical tools to OpenAI format.
+
+        OpenAI format wraps tool definition in {"type": "function", "function": {...}}
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+            }
+            for tool in tools
+        ]
+
+    def parse_tool_calls_from_response(self, response: Dict[str, Any]) -> List[ToolCall]:
+        """Extract tool calls from OpenAI response.
+
+        OpenAI responses have tool_calls in message.tool_calls array.
+        Arguments are JSON strings that need to be parsed.
+        """
+        if not response.get("choices"):
+            return []
+
+        message = response["choices"][0].get("message", {})
+        tool_calls_raw = message.get("tool_calls")
+
+        if not tool_calls_raw:
+            return []
+
+        tool_calls = []
+        for tc in tool_calls_raw:
+            try:
+                # Parse arguments from JSON string
+                arguments = json_module.loads(tc["function"]["arguments"])
+            except (json_module.JSONDecodeError, KeyError) as e:
+                # If parsing fails, use empty dict
+                arguments = {}
+
+            tool_calls.append(
+                ToolCall(
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    arguments=arguments
+                )
+            )
+
+        return tool_calls
+
+    def format_tool_result_for_api(self, result: ToolResult) -> Dict[str, Any]:
+        """Format tool result as OpenAI message.
+
+        OpenAI uses role="tool" with tool_call_id field.
+        """
+        return {
+            "role": "tool",
+            "tool_call_id": result.tool_call_id,
+            "content": result.result
+        }

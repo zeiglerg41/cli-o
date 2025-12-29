@@ -14,9 +14,25 @@ class ContextManager:
         """Initialize context manager."""
         self.files: Dict[str, str] = {}  # path -> content
         self.token_limit = token_limit
-        self.encoding = tiktoken.get_encoding("cl100k_base")
+        self._encoding = None  # Lazy-load tiktoken encoding
         # Store the working directory when context manager is created
         self.working_dir = Path(working_dir) if working_dir else Path.cwd()
+
+    @property
+    def encoding(self):
+        """Lazy-load tiktoken encoding on first use."""
+        if self._encoding is None:
+            try:
+                self._encoding = tiktoken.get_encoding("cl100k_base")
+            except Exception as e:
+                # Fallback: if tiktoken fails, provide a simple character-based estimate
+                # This allows clio to work offline (tokens will be approximate)
+                class FallbackEncoding:
+                    def encode(self, text: str):
+                        # Rough estimate: ~4 chars per token for English text
+                        return [0] * (len(text) // 4)
+                self._encoding = FallbackEncoding()
+        return self._encoding
     
     async def add_file(self, path: str) -> str:
         """Add file to context."""
