@@ -228,6 +228,9 @@ class ChatApp(App):
         # Command history
         self.command_history: List[str] = []
         self.history_index: int = -1
+
+        # Display messages for responsive re-rendering on resize
+        self.display_messages: List[tuple] = []  # (content, title, border_style)
     
     def compose(self) -> ComposeResult:
         """Compose UI."""
@@ -236,8 +239,8 @@ class ChatApp(App):
         # Status bar
         yield Static(self._get_status_text(), id="status-bar")
 
-        # Chat log
-        yield RichLog(id="chat-log", wrap=True, markup=True)
+        # Chat log with low min_width to allow dynamic resizing
+        yield RichLog(id="chat-log", wrap=True, markup=True, min_width=10)
 
         # Thinking indicator (hidden by default)
         yield ThinkingIndicator(id="thinking-indicator", classes="hidden")
@@ -589,10 +592,81 @@ class ChatApp(App):
     # _cmd_web removed - /web now flows through normal message path for proper tool display
 
     def _create_panel(self, content, title="", border_style="blue"):
-        """Create a panel that fits within the terminal width."""
-        # Get terminal width, subtract padding and borders
-        width = self.size.width - 6  # Account for padding and borders
-        return Panel(content, title=title, border_style=border_style, width=width)
+        """Create a responsive panel that adapts to terminal width."""
+        # Use Panel but let it size dynamically
+        return Panel(content, title=title, border_style=border_style, expand=True)
+
+    def _write_message(self, content, title="", border_style="blue", content_type="auto"):
+        """Write a message to chat log and store for re-rendering.
+
+        Args:
+            content: Either a string (for raw text/markdown) or a renderable
+            content_type: "markdown", "text", or "auto" to detect from type
+        """
+        chat_log = self.query_one("#chat-log", RichLog)
+
+        # Determine content type and extract raw string if possible
+        raw_content = None
+        if isinstance(content, str):
+            raw_content = content
+            detected_type = "text"
+        elif isinstance(content, Markdown):
+            raw_content = content.markup  # Extract the markdown string
+            detected_type = "markdown"
+        else:
+            # For other renderables (Text, etc), store the object
+            detected_type = "renderable"
+
+        final_type = content_type if content_type != "auto" else detected_type
+        self.display_messages.append((raw_content if raw_content else content, title, border_style, final_type))
+        # Use expand and shrink to allow dynamic resizing
+        chat_log.write(self._create_panel(content, title=title, border_style=border_style), expand=True, shrink=True)
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Handle terminal resize by re-rendering all messages."""
+        debug_log = "/tmp/clio_resize_debug.log"
+        try:
+            chat_log = self.query_one("#chat-log", RichLog)
+
+            with open(debug_log, "a") as f:
+                f.write(f"\n=== RESIZE EVENT ===\n")
+                f.write(f"Terminal size: {event.size}\n")
+                f.write(f"chat_log.size: {chat_log.size}\n")
+                f.write(f"chat_log.scrollable_content_region: {chat_log.scrollable_content_region}\n")
+                f.write(f"chat_log.scrollable_content_region.width: {chat_log.scrollable_content_region.width}\n")
+
+            # Clear the line cache if it exists
+            if hasattr(chat_log, '_line_cache'):
+                chat_log._line_cache.clear()
+
+            # Reset virtual size tracking
+            if hasattr(chat_log, '_widest_line_width'):
+                chat_log._widest_line_width = 0
+
+            chat_log.clear()
+            chat_log.refresh()
+
+            # Re-write all messages with expand and shrink to adapt to new width
+            for stored_content, title, border_style, content_type in self.display_messages:
+                if content_type == "markdown":
+                    content = Markdown(stored_content)
+                elif content_type == "text":
+                    content = stored_content
+                else:
+                    content = stored_content  # Use stored renderable as-is
+
+                # Use expand and shrink for dynamic resizing
+                chat_log.write(self._create_panel(content, title=title, border_style=border_style), expand=True, shrink=True)
+
+            with open(debug_log, "a") as f:
+                f.write(f"After rewrite - chat_log.scrollable_content_region.width: {chat_log.scrollable_content_region.width}\n")
+                f.write(f"After rewrite - chat_log._widest_line_width: {chat_log._widest_line_width}\n")
+
+            chat_log.refresh()
+        except Exception as e:
+            import traceback
+            with open(debug_log, "a") as f:
+                f.write(f"ERROR: {e}\n{traceback.format_exc()}\n")
 
     async def on_mount(self) -> None:
         """Handle mount."""
@@ -609,12 +683,12 @@ class ChatApp(App):
             db.close()
 
             if messages:
-                chat_log.write(self._create_panel(
+                self._write_message(
                     f"[bold cyan]Resuming Conversation #{self.conversation_id}[/bold cyan]\n\n"
                     f"📝 Session log: [dim]{log_path}[/dim]\n\n"
                     f"[dim]Loaded {len(messages)} previous messages[/dim]",
                     title="Welcome Back"
-                ))
+                )
 
                 # Display conversation history
                 for msg in messages:
@@ -622,11 +696,11 @@ class ChatApp(App):
                     content = msg["content"]
 
                     if role == "user":
-                        chat_log.write(self._create_panel(content, title="[bold cyan]You[/bold cyan]", border_style="cyan"))
+                        self._write_message(content, title="[bold cyan]You[/bold cyan]", border_style="cyan")
                     elif role == "assistant":
                         # Skip empty assistant messages (tool calls with no response)
                         if content and content.strip():
-                            chat_log.write(self._create_panel(Markdown(content), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta"))
+                            self._write_message(Markdown(content), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta")
                     elif role == "tool":
                         # Show tool results in dim (truncate long results)
                         if len(content) > 200:
@@ -640,13 +714,13 @@ class ChatApp(App):
                 chat_log.write("[dim]─── End of previous conversation ───[/dim]\n")
         else:
             # New conversation
-            chat_log.write(self._create_panel(
+            self._write_message(
                 "[bold cyan]CLIO[/bold cyan] - Command Line Interactive Operator\n\n"
                 "A self-hosted AI coding assistant.\n\n"
                 f"📝 Session log: [dim]{log_path}[/dim]\n\n"
                 "Type [bold]/help[/bold] for commands or start chatting!",
                 title="Welcome"
-            ))
+            )
 
         # Try to connect to IDE bridge (now that event loop is running)
         asyncio.create_task(self._do_bridge_connect())
@@ -952,8 +1026,7 @@ class ChatApp(App):
         self._debug_log(f"🔍 _process_message called with: '{user_input}'")
 
         # Show user message
-        chat_log = self.query_one("#chat-log", RichLog)
-        chat_log.write(self._create_panel(user_input, title="[bold cyan]You[/bold cyan]", border_style="cyan"))
+        self._write_message(user_input, title="[bold cyan]You[/bold cyan]", border_style="cyan")
 
         # Parse command or message
         command, args, original = self.command_router.parse(user_input)
@@ -974,7 +1047,7 @@ class ChatApp(App):
             # Execute command
             result = await self.command_router.execute(command, args)
             self._debug_log(f"🔍 Command result: {result[:100]}...")
-            chat_log.write(self._create_panel(Markdown(result), title="[bold purple]System[/bold purple]", border_style="purple"))
+            self._write_message(Markdown(result), title="[bold purple]System[/bold purple]", border_style="purple")
 
             # Add system message to history
             self.conversation_history.append({"role": "system", "content": result})
@@ -1003,7 +1076,7 @@ class ChatApp(App):
                 # Hide thinking indicator
                 thinking_indicator.add_class("hidden")
 
-                chat_log.write(self._create_panel(Markdown(response), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta"))
+                self._write_message(Markdown(response), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta")
 
                 # Save last response and add to history
                 self.last_assistant_response = response
@@ -1015,7 +1088,7 @@ class ChatApp(App):
                 # Get full traceback
                 tb = traceback.format_exc()
                 error_msg = f"**Error:**\n```\n{str(e)}\n\n{tb}\n```"
-                chat_log.write(self._create_panel(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red"))
+                self._write_message(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red")
 
                 # Add error to history
                 self.conversation_history.append({"role": "system", "content": f"Error: {str(e)}"})
@@ -1074,6 +1147,7 @@ class ChatApp(App):
         """Clear chat log."""
         chat_log = self.query_one("#chat-log", RichLog)
         chat_log.clear()
+        self.display_messages.clear()  # Also clear stored messages
         self.agent.clear_history()
         self.conversation_history.clear()
         self.last_assistant_response = ""
