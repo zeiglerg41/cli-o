@@ -15,7 +15,7 @@ class AutocompleteOverlay(Container):
         display: none;
         width: 100%;
         height: auto;
-        max-height: 10;
+        max-height: 15;
         background: $surface;
         border: solid $primary;
     }
@@ -27,18 +27,29 @@ class AutocompleteOverlay(Container):
     AutocompleteOverlay OptionList {
         width: 100%;
         height: auto;
-        max-height: 10;
+        max-height: 15;
         background: $surface;
         border: none;
+        overflow-y: auto;
     }
     """
 
     def __init__(self, working_dir: Path, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.working_dir = working_dir
-        self.commands = ['help', 'model', 'clear', 'exit', 'files', 'add',
-                        'remove', 'config', 'copy', 'export', 'history',
-                        'cleanup', 'continue', 'web']
+        self.commands = [
+            ('cleanup', 'Delete old conversations'),
+            ('clear', 'Clear conversation history'),
+            ('config', 'Show configuration'),
+            ('copy', 'Copy last assistant response'),
+            ('exit', 'Exit the application'),
+            ('export', 'Export conversation to markdown'),
+            ('help', 'Show help message'),
+            ('history', 'Resume a previous conversation'),
+            ('model', 'List and switch models'),
+            ('usage', 'Show token usage and cost breakdown'),
+            ('web', 'Search the web'),
+        ]
         self.current_trigger = None  # '/' or '@' or None
         self.trigger_pos = -1
         self.search_term = ""
@@ -146,8 +157,8 @@ class AutocompleteOverlay(Container):
             return self.commands
 
         search_lower = search_term.lower()
-        prefix = [cmd for cmd in self.commands if cmd.startswith(search_lower)]
-        contains = [cmd for cmd in self.commands if search_lower in cmd and cmd not in prefix]
+        prefix = [cmd for cmd in self.commands if cmd[0].startswith(search_lower)]
+        contains = [cmd for cmd in self.commands if search_lower in cmd[0] and cmd not in prefix]
 
         return prefix + contains
 
@@ -231,11 +242,13 @@ class AutocompleteOverlay(Container):
             matched.sort(key=lambda x: (x[0], x[1][2]))
             return [item[1] for item in matched[:max_results]]
 
-    def _format_command_option(self, cmd: str) -> Option:
+    def _format_command_option(self, cmd_data: tuple) -> Option:
         """Format a command as an Option."""
+        cmd, desc = cmd_data
         display = Text()
         display.append("⚡ ", style="bold cyan")
         display.append(f"/{cmd}", style="cyan")
+        display.append(f" - {desc}", style="dim")
         return Option(display, id=cmd)
 
     def _format_file_option(self, file_data: tuple) -> Option:

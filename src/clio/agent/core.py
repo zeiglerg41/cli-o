@@ -28,6 +28,24 @@ def strip_thinking_tags(text: str) -> str:
 class Agent:
     """AI agent with tool use capabilities."""
 
+    # Model pricing (input/output per 1M tokens)
+    MODEL_PRICING = {
+        "gpt-5.2": {"input": 1.25, "output": 10.00},
+        "gpt-5.1": {"input": 1.50, "output": 12.00},
+        "gpt-5": {"input": 2.00, "output": 15.00},
+        "gpt-4.1": {"input": 2.00, "output": 8.00},
+        "gpt-4.1-mini": {"input": 0.50, "output": 2.00},
+        "gpt-4.1-nano": {"input": 0.10, "output": 0.50},
+        "gpt-4o": {"input": 2.50, "output": 10.00},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+        "gpt-4": {"input": 30.00, "output": 60.00},
+        "o1": {"input": 15.00, "output": 60.00},
+        "o1-preview": {"input": 15.00, "output": 60.00},
+        "o1-mini": {"input": 3.00, "output": 12.00},
+        "o3-mini": {"input": 1.10, "output": 4.40},
+    }
+
     def __init__(
         self,
         config_manager: ConfigManager,
@@ -99,12 +117,20 @@ class Agent:
         # System prompt - Based on Qwen3 best practices: keep concise, single-purpose
         self.system_prompt = """You are a coding assistant that directly edits files using tools.
 
+@ MENTIONS: When user writes @filename or @path, strip the @ prefix before using in tool calls.
+Example: "@clio/" → list_directory("clio/")
+
 When user says "@file change X to Y", immediately:
 1. read_file("file")
 2. edit_file("file", "X", "Y")
 3. Respond: "Changed X to Y"
 
-Never explain or ask - just execute the edits.
+RESPONSE RULES (CRITICAL):
+- Zero fluff. No greetings, pleasantries, or filler phrases like "Let me know" or "Feel free to ask"
+- Answer questions with minimum viable words. "Yes" not "Yes, I can do that"
+- State facts only. Never pad responses
+- Never explain unless explicitly asked "why" or "how"
+- Execute tool calls immediately without narration
 
 Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory"""
 
@@ -139,7 +165,42 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         
         # Update config
         self.config_manager.set_default_model(provider_name, model)
-    
+
+    def _calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        """Calculate cost in USD for a model request.
+
+        Args:
+            model: Model name
+            prompt_tokens: Input tokens
+            completion_tokens: Output tokens
+
+        Returns:
+            Cost in USD
+        """
+        # Find pricing for this model (check for exact match or prefix)
+        pricing = None
+        model_lower = model.lower()
+
+        # Try exact match first
+        if model_lower in self.MODEL_PRICING:
+            pricing = self.MODEL_PRICING[model_lower]
+        else:
+            # Try prefix match (e.g., "gpt-4o-2024-05-13" matches "gpt-4o")
+            for model_prefix, model_pricing in self.MODEL_PRICING.items():
+                if model_lower.startswith(model_prefix):
+                    pricing = model_pricing
+                    break
+
+        if not pricing:
+            # Unknown model - return 0 cost
+            return 0.0
+
+        # Calculate cost (prices are per 1M tokens)
+        input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
+        output_cost = (completion_tokens / 1_000_000) * pricing["output"]
+
+        return input_cost + output_cost
+
     async def chat(self, user_message: str, context: str = "") -> str:
         """Send a message and get response."""
         # Log user message
@@ -250,6 +311,29 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 has_tool_calls=bool(message.get("tool_calls")),
                 finish_reason=choice.get("finish_reason", "unknown")
             )
+
+            # Capture usage statistics
+            if response.get("usage"):
+                usage = response["usage"]
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+
+                # Calculate cost
+                cost_usd = self._calculate_cost(
+                    self.current_model,
+                    prompt_tokens,
+                    completion_tokens
+                )
+
+                # Store in database
+                self.history_db.add_usage_stat(
+                    conversation_id=self.conversation_id,
+                    model=self.current_model,
+                    provider=self.current_provider_name,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost_usd=cost_usd
+                )
 
             # Add assistant message
             self.messages.append(message)

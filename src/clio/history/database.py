@@ -72,6 +72,22 @@ class HistoryDatabase:
             )
         """)
 
+        # Usage stats table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usage_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                model TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                cost_usd REAL NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            )
+        """)
+
         # Create indexes
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_conv_start_time
@@ -81,6 +97,16 @@ class HistoryDatabase:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_msg_conv_id
             ON messages(conversation_id)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_usage_timestamp
+            ON usage_stats(timestamp DESC)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_usage_conv_id
+            ON usage_stats(conversation_id)
         """)
 
         self.conn.commit()
@@ -320,6 +346,141 @@ class HistoryDatabase:
         except Exception as e:
             logger.warning(f"RAG retrieval failed: {e}")
             return []
+
+    def add_usage_stat(
+        self,
+        conversation_id: int,
+        model: str,
+        provider: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: float
+    ) -> None:
+        """Add usage statistics for a single API call.
+
+        Args:
+            conversation_id: Conversation ID
+            model: Model name
+            provider: Provider name
+            prompt_tokens: Input tokens
+            completion_tokens: Output tokens
+            cost_usd: Cost in USD
+        """
+        cursor = self.conn.cursor()
+        timestamp = datetime.now().isoformat()
+        total_tokens = prompt_tokens + completion_tokens
+
+        cursor.execute("""
+            INSERT INTO usage_stats (
+                conversation_id, timestamp, model, provider,
+                prompt_tokens, completion_tokens, total_tokens, cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (conversation_id, timestamp, model, provider,
+              prompt_tokens, completion_tokens, total_tokens, cost_usd))
+
+        self.conn.commit()
+
+    def get_session_usage(self, conversation_id: int) -> Dict[str, any]:
+        """Get usage stats for current session.
+
+        Args:
+            conversation_id: Conversation ID
+
+        Returns:
+            Dict with total_cost, prompt_tokens, completion_tokens
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT
+                SUM(prompt_tokens) as prompt_tokens,
+                SUM(completion_tokens) as completion_tokens,
+                SUM(cost_usd) as total_cost
+            FROM usage_stats
+            WHERE conversation_id = ?
+        """, (conversation_id,))
+
+        row = cursor.fetchone()
+        if row and row['total_cost']:
+            return {
+                'prompt_tokens': row['prompt_tokens'] or 0,
+                'completion_tokens': row['completion_tokens'] or 0,
+                'total_cost': row['total_cost'] or 0.0
+            }
+        return {'prompt_tokens': 0, 'completion_tokens': 0, 'total_cost': 0.0}
+
+    def get_today_usage(self) -> Dict[str, any]:
+        """Get usage stats for today.
+
+        Returns:
+            Dict with total_cost, prompt_tokens, completion_tokens
+        """
+        cursor = self.conn.cursor()
+        today = datetime.now().date().isoformat()
+
+        cursor.execute("""
+            SELECT
+                SUM(prompt_tokens) as prompt_tokens,
+                SUM(completion_tokens) as completion_tokens,
+                SUM(cost_usd) as total_cost
+            FROM usage_stats
+            WHERE DATE(timestamp) = ?
+        """, (today,))
+
+        row = cursor.fetchone()
+        if row and row['total_cost']:
+            return {
+                'prompt_tokens': row['prompt_tokens'] or 0,
+                'completion_tokens': row['completion_tokens'] or 0,
+                'total_cost': row['total_cost'] or 0.0
+            }
+        return {'prompt_tokens': 0, 'completion_tokens': 0, 'total_cost': 0.0}
+
+    def get_monthly_usage(self, year: Optional[int] = None, month: Optional[int] = None) -> List[Dict[str, any]]:
+        """Get usage stats for a month, grouped by model.
+
+        Args:
+            year: Year (defaults to current)
+            month: Month (defaults to current)
+
+        Returns:
+            List of dicts with model, prompt_tokens, completion_tokens, total_cost
+        """
+        if year is None or month is None:
+            now = datetime.now()
+            year = now.year
+            month = now.month
+
+        cursor = self.conn.cursor()
+
+        # Get start and end of month
+        start_date = f"{year}-{month:02d}-01"
+        if month == 12:
+            end_date = f"{year + 1}-01-01"
+        else:
+            end_date = f"{year}-{month + 1:02d}-01"
+
+        cursor.execute("""
+            SELECT
+                model,
+                SUM(prompt_tokens) as prompt_tokens,
+                SUM(completion_tokens) as completion_tokens,
+                SUM(cost_usd) as total_cost
+            FROM usage_stats
+            WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY model
+            ORDER BY total_cost DESC
+        """, (start_date, end_date))
+
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'model': row['model'],
+                'prompt_tokens': row['prompt_tokens'] or 0,
+                'completion_tokens': row['completion_tokens'] or 0,
+                'total_cost': row['total_cost'] or 0.0
+            })
+
+        return results
 
     def close(self):
         """Close database connection."""

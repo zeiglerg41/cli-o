@@ -14,19 +14,16 @@ class CommandAutoComplete(AutoComplete):
     def _get_all_commands(self) -> list[tuple[str, str]]:
         """Get all available commands with descriptions."""
         commands = [
-            ("/help", "Show help message"),
-            ("/model", "List and switch models"),
+            ("/cleanup", "Delete old conversations"),
             ("/clear", "Clear conversation history"),
-            ("/exit", "Exit the application"),
-            ("/files", "List files in context"),
-            ("/add", "Add file or folder to context"),
-            ("/remove", "Remove file from context"),
             ("/config", "Show configuration"),
             ("/copy", "Copy last assistant response"),
+            ("/exit", "Exit the application"),
             ("/export", "Export conversation to markdown"),
-            ("/history", "List recent conversations"),
-            ("/continue", "Continue a previous conversation"),
-            ("/cleanup", "Delete old conversations"),
+            ("/help", "Show help message"),
+            ("/history", "Resume a previous conversation"),
+            ("/model", "List and switch models"),
+            ("/usage", "Show token usage and cost breakdown"),
             ("/web", "Search the web"),
         ]
         return commands

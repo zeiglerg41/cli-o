@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 from rich.console import Console
+from rich.align import Align
 
 from ..agent.core import Agent
 from ..context.manager import ContextManager
@@ -43,6 +44,10 @@ class AutocompleteTextArea(TextArea):
         """Message sent when Enter pressed (without Shift) to submit."""
         pass
 
+    class EscapeKey(Message):
+        """Message sent when Escape is pressed."""
+        pass
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.autocomplete_visible = False
@@ -63,6 +68,13 @@ class AutocompleteTextArea(TextArea):
             event.prevent_default()
             event.stop()
             self.post_message(self.AutocompleteKey(event.key))
+            return
+
+        # Handle Escape - prevent default focus change
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.EscapeKey())
             return
 
         # Shift+Enter comes through as backslash THEN enter - handle backslash
@@ -241,10 +253,11 @@ class ChatApp(App):
             "user_color": "cyan",
             "user_title": "[bold cyan]You[/bold cyan]",
             "assistant_color": "magenta",
-            "assistant_title": "[bold magenta]Assistant[/bold magenta]",
+            "assistant_title": "[bold magenta]Clio[/bold magenta]",
             "system_color": "purple",
             "system_title": "[bold purple]System[/bold purple]",
             "tool_color": "dim cyan",
+            "tool_title": "[bold dim cyan]Tool[/bold dim cyan]",
         },
         "colorblind": {
             # Colorblind-friendly palette (blue/yellow/orange)
@@ -252,10 +265,11 @@ class ChatApp(App):
             "user_color": "blue",
             "user_title": "[bold blue]You[/bold blue]",
             "assistant_color": "yellow",
-            "assistant_title": "[bold yellow]Assistant[/bold yellow]",
+            "assistant_title": "[bold yellow]Clio[/bold yellow]",
             "system_color": "bright_yellow",
             "system_title": "[bold bright_yellow]System[/bold bright_yellow]",
             "tool_color": "dim blue",
+            "tool_title": "[bold dim blue]Tool[/bold dim blue]",
         }
     }
 
@@ -317,6 +331,18 @@ class ChatApp(App):
         max-height: 8;
         border: solid $primary;
     }
+
+    #escape-hint {
+        width: 100%;
+        height: auto;
+        padding: 0 1;
+        color: $text-muted;
+        text-style: dim;
+    }
+
+    #escape-hint.hidden {
+        display: none;
+    }
     """
 
     BINDINGS = [
@@ -367,6 +393,15 @@ class ChatApp(App):
         # Command history
         self.command_history: List[str] = []
         self.history_index: int = -1
+        self.current_draft: str = ""
+
+        # Escape key tracking for double-tap to clear
+        self.escape_pressed_once: bool = False
+        self.escape_timer: Optional[asyncio.TimerHandle] = None
+
+        # Tool call batching - collect multiple tool calls into one panel
+        self.pending_tool_calls: List[str] = []
+        self.tool_batch_timer: Optional[asyncio.TimerHandle] = None
 
         # Display messages for responsive re-rendering on resize
         self.display_messages: List[tuple] = []  # (content, title, border_style)
@@ -404,6 +439,7 @@ class ChatApp(App):
                 tab_behavior="indent"
             )
             yield chat_input
+            yield Label("", id="escape-hint", classes="hidden")
 
         # Custom autocomplete overlay
         yield AutocompleteOverlay(Path(self.launch_dir), id="autocomplete-overlay")
@@ -415,8 +451,6 @@ class ChatApp(App):
         config = self.config_manager.load()
         provider = self.agent.current_provider_name
         model = self.agent.current_model
-        files_count = len(self.context_manager.list_files())
-        tokens = self.context_manager.get_total_tokens()
 
         # Get hostname for display
         provider_config = config.providers.get(provider)
@@ -430,7 +464,12 @@ class ChatApp(App):
         # Show current directory for @ mentions
         cwd_short = Path(self.launch_dir).name or self.launch_dir
 
-        return f"🤖 {model} @ {hostname} | 📁 {files_count} files | 🔢 {tokens:,} tokens | 📂 {cwd_short}"
+        # Get session usage
+        session_usage = self.agent.history_db.get_session_usage(self.agent.conversation_id)
+        session_tokens = session_usage.get('prompt_tokens', 0) + session_usage.get('completion_tokens', 0)
+        session_cost = session_usage.get('total_cost', 0.0)
+
+        return f"🤖 {model} @ {hostname} | 📂 {cwd_short} | 🔢 {session_tokens:,} tokens | 💵 ${session_cost:.4f}"
 
     async def _do_bridge_connect(self) -> None:
         """Async task to connect to IDE bridge."""
@@ -451,14 +490,12 @@ class ChatApp(App):
         self.command_router.register("/clear", self._cmd_clear)
         self.command_router.register("/exit", self._cmd_exit)
         self.command_router.register("/model", self._cmd_model)
-        self.command_router.register("/files", self._cmd_files)
-        self.command_router.register("/add", self._cmd_add)
-        self.command_router.register("/remove", self._cmd_remove)
         self.command_router.register("/config", self._cmd_config)
         self.command_router.register("/copy", self._cmd_copy)
         self.command_router.register("/export", self._cmd_export)
         self.command_router.register("/history", self._cmd_history)
         self.command_router.register("/cleanup", self._cmd_cleanup)
+        self.command_router.register("/usage", self._cmd_usage)
         # /web handled specially in on_input_submitted - no command handler needed
     
     def _cmd_help(self, args: str) -> str:
@@ -469,19 +506,24 @@ class ChatApp(App):
 - `/model` - List and switch models (interactive)
 - `/clear` - Clear conversation history
 - `/exit` - Exit the application
-- `/files` - List files in context
-- `/add <path>` - Add file or folder to context
-- `/remove <path>` - Remove file from context
 - `/config` - Show configuration
 - `/copy` - Copy last assistant response to clipboard
 - `/export [filename]` - Export conversation to markdown file
 - `/history` - Resume a previous conversation (interactive selection)
 - `/cleanup` - Delete old conversations (keep only 20 most recent)
+- `/usage` - Show token usage and cost breakdown for this month
 - `/web <query>` - Search the web and get AI response
 
-**@-mentions:**
-- `@filename` - Reference a file (will be added to context)
-- `@"path with spaces"` - Reference path with spaces
+**Working with Files:**
+The AI can read, write, and edit files using built-in tools. Just ask naturally:
+- "Read the contents of auth.py"
+- "Edit server.js and change the port to 3000"
+- "List all Python files in the src directory"
+- "Search for the function called handleLogin"
+
+You can also use `@filename` syntax to reference files:
+- `@auth.py` - The AI will read this file when needed
+- `@"path with spaces.txt"` - Use quotes for paths with spaces
 
 **Text Selection:**
 - Hold **Shift** and drag with mouse to select text
@@ -493,12 +535,12 @@ class ChatApp(App):
   - Uses blue/yellow/orange palette (safe for all colorblind types)
 
 **Examples:**
-- `Add error handling to @auth.py`
-- `/add src/`
-- `/model` to switch models
-- `/history` to resume a conversation
-- `/copy` to copy last response
-- `/export my-chat.md` to save conversation
+- "Add error handling to @auth.py"
+- "/model" to switch models
+- "/history" to resume a conversation
+- "/copy" to copy last response
+- "/export my-chat.md" to save conversation
+- "/web latest React 19 features" to search the web
 """
     
     def _cmd_clear(self, args: str) -> str:
@@ -517,6 +559,18 @@ class ChatApp(App):
         """List/switch models with numbered selection."""
         config = self.config_manager.load()
 
+        # Model pricing info (input/output per 1M tokens)
+        model_prices = {
+            "gpt-5.2": "(in: $1.25, out: $10 per 1M)",
+            "gpt-4.1": "(in: $2, out: $8 per 1M)",
+            "gpt-4.1-mini": "(in: $0.50, out: $2 per 1M)",
+            "gpt-4.1-nano": "(in: $0.10, out: $0.50 per 1M)",
+            "o1": "(in: $15, out: $60 per 1M)",
+            "o3-mini": "(in: $1.10, out: $4.40 per 1M)",
+            "gpt-4o-mini": "(in: $0.15, out: $0.60 per 1M)",
+            "gpt-4o": "(in: $2.50, out: $10 per 1M)",
+        }
+
         # Build list of all available models
         model_options = []
         for provider_name, provider_config in config.providers.items():
@@ -525,7 +579,9 @@ class ChatApp(App):
                 is_current = (provider_name == self.agent.current_provider_name and
                             model == self.agent.current_model)
                 marker = "●" if is_current else "○"
-                display_text = f"{marker} {model} @ {hostname}"
+                # Add pricing if available - use actual spacing for alignment
+                price_info = f"  {model_prices[model]}" if model in model_prices else ""
+                display_text = f"{marker} {model}{price_info}  @ {hostname}"
                 model_options.append((display_text, provider_name, model, is_current, hostname))
 
         # If args provided, try to switch by number
@@ -694,7 +750,7 @@ class ChatApp(App):
 
         if not conversations:
             colors = self._get_colors()
-            self._write_message("No conversation history found.", title=colors["system_title"], border_style=colors["system_color"])
+            self._write_message("No conversation history found.", title=colors["system_title"], border_style=colors["system_color"], align="center")
             return
 
         # Show modal screen for selection (now running in worker context)
@@ -718,17 +774,92 @@ class ChatApp(App):
         else:
             return "✓ No old conversations to delete"
 
-    def _create_panel(self, content, title="", border_style="blue"):
-        """Create a responsive panel that adapts to terminal width."""
-        # Use Panel but let it size dynamically
+    def _cmd_usage(self, args: str) -> str:
+        """Show usage statistics and costs."""
+        from datetime import datetime
+
+        # Get monthly usage
+        monthly_usage = self.agent.history_db.get_monthly_usage()
+
+        if not monthly_usage:
+            return "No usage data for this month yet."
+
+        # Format table
+        month_name = datetime.now().strftime("%B %Y")
+        lines = [f"📊 **{month_name} Usage**\n"]
+        lines.append("```")
+
+        # Table header with fixed column widths
+        lines.append(f"{'Model':<16} {'In Tokens':>10} {'Out Tokens':>12} {'Cost':>8}")
+        lines.append("─" * 50)
+
+        # Table rows
+        total_in = 0
+        total_out = 0
+        total_cost = 0.0
+
+        for row in monthly_usage:
+            model = row['model']
+            in_tokens = row['prompt_tokens']
+            out_tokens = row['completion_tokens']
+            cost = row['total_cost']
+
+            total_in += in_tokens
+            total_out += out_tokens
+            total_cost += cost
+
+            # Format tokens (K for thousands)
+            in_k = f"{in_tokens / 1000:.1f}K" if in_tokens >= 1000 else str(in_tokens)
+            out_k = f"{out_tokens / 1000:.1f}K" if out_tokens >= 1000 else str(out_tokens)
+
+            # Format model name (truncate if needed)
+            model_display = model[:16].ljust(16)
+
+            lines.append(f"{model_display} {in_k:>10} {out_k:>12} ${cost:>7.2f}")
+
+        # Total row
+        lines.append("")  # Blank line before total
+        lines.append("─" * 50)
+        total_in_k = f"{total_in / 1000:.1f}K" if total_in >= 1000 else str(total_in)
+        total_out_k = f"{total_out / 1000:.1f}K" if total_out >= 1000 else str(total_out)
+        lines.append(f"{'Total':<16} {total_in_k:>10} {total_out_k:>12} ${total_cost:>7.2f}")
+        lines.append("```")
+
+        return "\n".join(lines)
+
+    def _create_panel(self, content, title="", border_style="blue", align="left"):
+        """Create a responsive panel that adapts to terminal width.
+
+        Args:
+            content: The content to display
+            title: Panel title
+            border_style: Border color/style
+            align: Text alignment - "left", "center", or "right"
+        """
+        from rich.text import Text
+
+        # For plain strings, convert to Text with explicit justify to control alignment
+        if isinstance(content, str):
+            # Use from_markup to parse Rich markup tags like [bold], [cyan], etc.
+            text_obj = Text.from_markup(content)
+            text_obj.justify = "left" if align == "left" else "center"
+            content = text_obj
+        # For other renderables (Markdown, Text), wrap with Align
+        elif align == "center":
+            content = Align.center(content)
+        else:
+            # Explicitly left-align
+            content = Align.left(content)
+
         return Panel(content, title=title, border_style=border_style, expand=True)
 
-    def _write_message(self, content, title="", border_style="blue", content_type="auto"):
+    def _write_message(self, content, title="", border_style="blue", content_type="auto", align="left"):
         """Write a message to chat log and store for re-rendering.
 
         Args:
             content: Either a string (for raw text/markdown) or a renderable
             content_type: "markdown", "text", or "auto" to detect from type
+            align: Text alignment - "left" for user/assistant, "center" for system/tool
         """
         chat_log = self.query_one("#chat-log", RichLog)
 
@@ -745,9 +876,9 @@ class ChatApp(App):
             detected_type = "renderable"
 
         final_type = content_type if content_type != "auto" else detected_type
-        self.display_messages.append((raw_content if raw_content else content, title, border_style, final_type))
+        self.display_messages.append((raw_content if raw_content else content, title, border_style, final_type, align))
         # Use expand and shrink to allow dynamic resizing
-        chat_log.write(self._create_panel(content, title=title, border_style=border_style), expand=True, shrink=True)
+        chat_log.write(self._create_panel(content, title=title, border_style=border_style, align=align), expand=True, shrink=True)
 
     def on_resize(self, event: events.Resize) -> None:
         """Handle terminal resize by re-rendering all messages."""
@@ -774,7 +905,7 @@ class ChatApp(App):
             chat_log.refresh()
 
             # Re-write all messages with expand and shrink to adapt to new width
-            for stored_content, title, border_style, content_type in self.display_messages:
+            for stored_content, title, border_style, content_type, align in self.display_messages:
                 if content_type == "markdown":
                     content = Markdown(stored_content)
                 elif content_type == "text":
@@ -783,7 +914,7 @@ class ChatApp(App):
                     content = stored_content  # Use stored renderable as-is
 
                 # Use expand and shrink for dynamic resizing
-                chat_log.write(self._create_panel(content, title=title, border_style=border_style), expand=True, shrink=True)
+                chat_log.write(self._create_panel(content, title=title, border_style=border_style, align=align), expand=True, shrink=True)
 
             with open(debug_log, "a") as f:
                 f.write(f"After rewrite - chat_log.scrollable_content_region.width: {chat_log.scrollable_content_region.width}\n")
@@ -816,7 +947,8 @@ class ChatApp(App):
                     f"📝 Session log: [dim]{log_path}[/dim]\n\n"
                     f"[dim]Loaded {len(messages)} previous messages[/dim]",
                     title=colors["system_title"].replace("System", "Welcome Back"),
-                    border_style=colors["system_color"]
+                    border_style=colors["system_color"],
+                    align="center"
                 )
 
                 # Display conversation history
@@ -840,7 +972,13 @@ class ChatApp(App):
                     # Add to conversation history for /export etc
                     self.conversation_history.append({"role": role, "content": content})
 
-                chat_log.write("[dim]─── End of previous conversation ───[/dim]\n")
+                colors = self._get_colors()
+                self._write_message(
+                    "─── End of previous conversation ───",
+                    title=colors["system_title"],
+                    border_style=colors["system_color"],
+                    align="center"
+                )
         else:
             # New conversation
             colors = self._get_colors()
@@ -850,7 +988,8 @@ class ChatApp(App):
                 f"📝 Session log: [dim]{log_path}[/dim]\n\n"
                 "Type [bold]/help[/bold] for commands or start chatting!",
                 title=colors["system_title"].replace("System", "Welcome"),
-                border_style=colors["system_color"]
+                border_style=colors["system_color"],
+                align="center"
             )
 
         # Try to connect to IDE bridge (now that event loop is running)
@@ -932,6 +1071,36 @@ class ChatApp(App):
             else:
                 self._debug_log(f"🔍 Empty input, not submitting")
 
+    async def on_autocomplete_text_area_escape_key(self, message: AutocompleteTextArea.EscapeKey) -> None:
+        """Handle Escape key press."""
+        autocomplete = self.query_one("#autocomplete-overlay", AutocompleteOverlay)
+        autocomplete_visible = "visible" in autocomplete.classes
+
+        # If autocomplete is visible, just hide it
+        if autocomplete_visible:
+            autocomplete.hide()
+            chat_input = self.query_one("#chat-input", AutocompleteTextArea)
+            chat_input.autocomplete_visible = False
+            return
+
+        # Handle double-tap to clear
+        chat_input = self.query_one("#chat-input", AutocompleteTextArea)
+        if self.escape_pressed_once:
+            # Second tap - clear input
+            chat_input.clear()
+            self._reset_escape_state()
+        else:
+            # First tap - show hint and start timer
+            self.escape_pressed_once = True
+            hint = self.query_one("#escape-hint", Label)
+            hint.update("Press Escape again to clear")
+            hint.remove_class("hidden")
+
+            # Set timer to reset after 2 seconds
+            if self.escape_timer:
+                self.escape_timer.stop()
+            self.escape_timer = self.set_timer(2.0, self._reset_escape_state)
+
     async def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Handle text changes for autocomplete."""
         text = event.text_area.text
@@ -995,6 +1164,18 @@ class ChatApp(App):
             f.write(f"[{timestamp}] {message}\n")
             f.flush()
 
+    def _reset_escape_state(self):
+        """Reset escape key state and hide hint."""
+        self.escape_pressed_once = False
+        if self.escape_timer:
+            self.escape_timer.stop()
+            self.escape_timer = None
+        try:
+            hint = self.query_one("#escape-hint", Label)
+            hint.add_class("hidden")
+        except:
+            pass
+
     def _apply_completion(self, chat_input: TextArea, autocomplete: AutocompleteOverlay, completion: str):
         """Apply autocomplete completion when Tab/Enter is pressed."""
         text = chat_input.text
@@ -1055,6 +1236,10 @@ class ChatApp(App):
 
         self._debug_log(f"🔍 DEBUG on_key: key={event.key}, autocomplete_visible={autocomplete_visible}")
 
+        # Reset escape state on any non-escape key press
+        if event.key != "escape" and self.escape_pressed_once:
+            self._reset_escape_state()
+
         # Handle autocomplete navigation
         if autocomplete_visible:
             if event.key == "down":
@@ -1089,13 +1274,6 @@ class ChatApp(App):
                 event.prevent_default()
                 event.stop()
                 return
-            elif event.key == "escape":
-                self._debug_log(f"🔍 DEBUG: Escape in autocomplete")
-                # Escape cancels autocomplete
-                autocomplete.hide()
-                event.prevent_default()
-                return
-
         # Submit on Enter (Shift+Enter handled by backslash above)
         if event.key == "enter":
             self._debug_log(f"🔍 ENTER KEY PRESSED (not in autocomplete)")
@@ -1154,12 +1332,16 @@ class ChatApp(App):
 
     async def _process_message(self, user_input: str) -> None:
         """Process and send a user message."""
+        import asyncio
         self._debug_log(f"🔍 _process_message called with: '{user_input}'")
 
         colors = self._get_colors()
 
         # Show user message
         self._write_message(user_input, title=colors["user_title"], border_style=colors["user_color"])
+
+        # Yield to event loop to let UI update before starting AI processing
+        await asyncio.sleep(0)
 
         # Parse command or message
         command, args, original = self.command_router.parse(user_input)
@@ -1180,7 +1362,7 @@ class ChatApp(App):
             # Execute command
             result = await self.command_router.execute(command, args)
             self._debug_log(f"🔍 Command result: {result[:100]}...")
-            self._write_message(Markdown(result), title=colors["system_title"], border_style=colors["system_color"])
+            self._write_message(Markdown(result), title=colors["system_title"], border_style=colors["system_color"], align="center")
 
             # Add system message to history
             self.conversation_history.append({"role": "system", "content": result})
@@ -1200,14 +1382,32 @@ class ChatApp(App):
 
             # Show thinking indicator
             thinking_indicator = self.query_one("#thinking-indicator", ThinkingIndicator)
+            thinking_indicator.reset_tokens()
             thinking_indicator.remove_class("hidden")
 
             try:
                 # Use actual_message (transformed for /web or original for normal messages)
                 response = await self.agent.chat(actual_message, context)
 
+                # Get latest usage stats for this session to show in thinking indicator
+                session_usage = self.agent.history_db.get_session_usage(self.agent.conversation_id)
+                if session_usage:
+                    thinking_indicator.set_tokens(
+                        session_usage.get('prompt_tokens', 0),
+                        session_usage.get('completion_tokens', 0)
+                    )
+
+                # Brief delay to show final token count before hiding
+                await asyncio.sleep(0.5)
+
                 # Hide thinking indicator
                 thinking_indicator.add_class("hidden")
+
+                # Flush any pending tool calls BEFORE showing the response
+                if self.tool_batch_timer:
+                    self.tool_batch_timer.stop()
+                    self.tool_batch_timer = None
+                self._flush_tool_calls()
 
                 self._write_message(Markdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
 
@@ -1222,7 +1422,7 @@ class ChatApp(App):
                 tb = traceback.format_exc()
                 error_msg = f"**Error:**\n```\n{str(e)}\n\n{tb}\n```"
                 # Keep error as red - universal danger color
-                self._write_message(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red")
+                self._write_message(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red", align="center")
 
                 # Add error to history
                 self.conversation_history.append({"role": "system", "content": f"Error: {str(e)}"})
@@ -1240,17 +1440,12 @@ class ChatApp(App):
             return True
 
         # TODO: Implement interactive permission prompt
-        # For now, just log and approve
-        chat_log = self.query_one("#chat-log", RichLog)
-        chat_log.write(f"[dim]⚠️  {operation}: {details}[/dim]")
-
+        # For now, batch with tool calls
+        # Don't show permission requests - they're redundant with tool execution messages
         return True
 
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
-        """Handle tool execution notification."""
-        chat_log = self.query_one("#chat-log", RichLog)
-        colors = self._get_colors()
-
+        """Handle tool execution notification - batches consecutive tool calls."""
         # Format tool call nicely
         if tool_name == "edit_file":
             path = arguments.get("path", "unknown")
@@ -1273,11 +1468,39 @@ class ChatApp(App):
         else:
             tool_display = f"🔧 **{tool_name}**: {arguments}"
 
-        # Show tool call as a simple line (like Claude Code)
-        from rich.text import Text
-        tool_line = Text(tool_display, style=colors["tool_color"])
-        chat_log.write(tool_line)
-    
+        # Add to pending tool calls
+        self.pending_tool_calls.append(tool_display)
+
+        # Cancel existing timer if any
+        if self.tool_batch_timer:
+            self.tool_batch_timer.stop()
+
+        # Set timer to flush after 100ms of no new tool calls
+        self.tool_batch_timer = self.set_timer(0.1, self._flush_tool_calls)
+
+    def _flush_tool_calls(self) -> None:
+        """Display all batched tool calls in one panel."""
+        if not self.pending_tool_calls:
+            return
+
+        colors = self._get_colors()
+
+        # Combine all tool calls with newlines
+        combined = "\n".join(self.pending_tool_calls)
+
+        # Display in one panel using system colors (purple)
+        from rich.markdown import Markdown
+        self._write_message(
+            Markdown(combined),
+            title=colors["system_title"].replace("System", "Tools"),
+            border_style=colors["system_color"],
+            align="center"
+        )
+
+        # Clear the pending list
+        self.pending_tool_calls.clear()
+        self.tool_batch_timer = None
+
     def action_clear(self) -> None:
         """Clear chat log."""
         chat_log = self.query_one("#chat-log", RichLog)

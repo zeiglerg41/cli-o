@@ -9,6 +9,16 @@ from typing import Dict, Set
 # Models are lowercase for case-insensitive matching
 TOOL_SUPPORT_MATRIX: Dict[str, Dict[str, bool]] = {
     "openai": {
+        # GPT-5 family
+        "gpt-5.2": True,
+        "gpt-5.1": True,
+        "gpt-5": True,
+
+        # GPT-4.1 family
+        "gpt-4.1": True,
+        "gpt-4.1-mini": True,
+        "gpt-4.1-nano": True,
+
         # GPT-4 family
         "gpt-4": True,
         "gpt-4-turbo": True,
