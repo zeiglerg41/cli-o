@@ -3,18 +3,47 @@ import sys
 import os
 import click
 from pathlib import Path
+from datetime import datetime, timedelta
 
 # Capture the working directory IMMEDIATELY at entry point
 # before any imports or operations that might change it
 _LAUNCH_CWD = os.getcwd()
 
 
+def relative_time(iso_timestamp: str) -> str:
+    """Convert ISO timestamp to relative time string like '2 hours ago'."""
+    dt = datetime.fromisoformat(iso_timestamp)
+    now = datetime.now()
+    diff = now - dt
+
+    if diff < timedelta(minutes=1):
+        return "just now"
+    elif diff < timedelta(hours=1):
+        minutes = int(diff.total_seconds() / 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    elif diff < timedelta(days=1):
+        hours = int(diff.total_seconds() / 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    elif diff < timedelta(days=7):
+        days = diff.days
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    elif diff < timedelta(days=30):
+        weeks = diff.days // 7
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    elif diff < timedelta(days=365):
+        months = diff.days // 30
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    else:
+        years = diff.days // 365
+        return f"{years} year{'s' if years != 1 else ''} ago"
+
+
 @click.group(invoke_without_command=True)
 @click.option('--history', 'show_history', is_flag=True, help='List recent conversations')
 @click.option('--cleanup', 'do_cleanup', is_flag=True, help='Delete old conversations')
-@click.option('--continue', 'continue_id', type=int, help='Continue a conversation by ID')
+@click.option('--continue', 'continue_flag', is_flag=True, help='Continue a conversation (interactive selection)')
 @click.pass_context
-def main(ctx, show_history, do_cleanup, continue_id):
+def main(ctx, show_history, do_cleanup, continue_flag):
     """Claude Clone - Self-hosted AI coding assistant."""
     from .history.database import HistoryDatabase
     from datetime import datetime
@@ -33,18 +62,19 @@ def main(ctx, show_history, do_cleanup, continue_id):
 
         for conv in conversations:
             conv_id = conv['id']
-            start_time = datetime.fromisoformat(conv['start_time']).strftime('%Y-%m-%d %H:%M:%S')
+            time_ago = relative_time(conv['start_time'])
             model = conv['model']
             msg_count = conv['message_count']
-            title = conv['title'] or f"Conversation in {Path(conv['working_dir']).name}"
+            title = conv['title'] or "New conversation"
             starred = "⭐ " if conv['starred'] else ""
+            working_dir = Path(conv['working_dir']).name
 
-            click.echo(f"  [{conv_id}] {starred}{title}")
-            click.echo(f"      {start_time} | {model} | {msg_count} messages")
+            click.echo(f"  {starred}{title}")
+            click.echo(f"  {time_ago} · {msg_count} messages · {working_dir}")
             click.echo()
 
         click.echo("\nTo continue a conversation, run:")
-        click.echo("  clio --continue <id>")
+        click.echo("  clio --continue")
         db.close()
         return
 
@@ -63,16 +93,76 @@ def main(ctx, show_history, do_cleanup, continue_id):
         return
 
     # Handle --continue flag
-    if continue_id is not None:
+    if continue_flag:
+        from simple_term_menu import TerminalMenu
         from .ui.app import ChatApp
+        import shutil
+
         db = HistoryDatabase()
-        conversations = db.get_recent_conversations(limit=100)
-        conv_ids = [c['id'] for c in conversations]
+        conversations = db.get_recent_conversations(limit=20)
         db.close()
 
-        if continue_id not in conv_ids:
-            click.echo(f"❌ Conversation {continue_id} not found.")
+        if not conversations:
+            click.echo("No conversations found. Start a new session with 'clio'")
             return
+
+        # Get terminal width
+        terminal_width = shutil.get_terminal_size().columns
+
+        # Build menu options - completely single line
+        menu_items = []
+        conv_map = {}
+
+        for idx, conv in enumerate(conversations):
+            conv_id = conv['id']
+            time_ago = relative_time(conv['start_time'])
+            msg_count = conv['message_count']
+            title = conv['title'] or "New conversation"
+            working_dir = Path(conv['working_dir']).name
+            starred = "⭐ " if conv['starred'] else ""
+
+            # Calculate available space for title
+            # Format: "❯ • {title}  ({time} · {N} msgs · {dir})"
+            # Reserve space for: cursor (3) + bullet (2) + metadata (~35 chars) + margins (5)
+            metadata = f"  ({time_ago} · {msg_count} msgs · {working_dir})"
+            reserved_space = 3 + 2 + len(metadata) + 5
+            if starred:
+                reserved_space += 2  # for star emoji
+
+            max_title_len = max(20, terminal_width - reserved_space)  # At least 20 chars for title
+
+            display_title = title[:max_title_len]
+            if len(title) > max_title_len:
+                display_title = display_title[:max_title_len-3] + "..."
+
+            # Completely single line format with bullet
+            menu_text = f"• {starred}{display_title}{metadata}"
+
+            menu_items.append(menu_text)
+            conv_map[menu_text] = conv_id
+
+        # Show interactive menu
+        terminal_menu = TerminalMenu(
+            menu_items,
+            title="Resume Session (↑/↓ to navigate, Enter to select, q to quit)",
+            menu_cursor="❯ ",
+            menu_cursor_style=("fg_cyan", "bold"),
+            menu_highlight_style=("fg_cyan", "bold"),
+            cursor_index=0,  # Start at first item (top)
+            multi_select=False,
+            show_search_hint=False,
+            clear_screen=False,
+        )
+
+        menu_entry_index = terminal_menu.show()
+
+        if menu_entry_index is None:
+            # User pressed 'q' or Ctrl+C
+            click.echo("\nCancelled")
+            return
+
+        selected_menu_text = menu_items[menu_entry_index]
+        continue_id = conv_map[selected_menu_text]
 
         # Start app with conversation ID
         app = ChatApp(launch_dir=_LAUNCH_CWD, conversation_id=continue_id)
@@ -82,8 +172,21 @@ def main(ctx, show_history, do_cleanup, continue_id):
     if ctx.invoked_subcommand is None:
         # Run interactive mode
         from .ui.app import ChatApp
-        app = ChatApp(launch_dir=_LAUNCH_CWD)
-        app.run()
+
+        # Loop to handle /history restarts
+        conversation_id = None
+        while True:
+            app = ChatApp(launch_dir=_LAUNCH_CWD, conversation_id=conversation_id)
+            app.run()
+
+            # Check if user selected a conversation from /history
+            if app.selected_conversation_id:
+                conversation_id = app.selected_conversation_id
+                # Restart with the selected conversation
+                continue
+            else:
+                # Normal exit
+                break
 
 
 @main.command()

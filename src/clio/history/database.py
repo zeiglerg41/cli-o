@@ -4,6 +4,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class HistoryDatabase:
@@ -24,6 +27,17 @@ class HistoryDatabase:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row  # Return rows as dicts
         self._init_schema()
+
+        # Initialize RAG retriever (optional - gracefully degrades if unavailable)
+        self._rag_retriever = None
+        try:
+            from ..rag.retriever import ContextRetriever
+            self._rag_retriever = ContextRetriever()
+            logger.info("RAG features enabled")
+        except ImportError:
+            logger.info("RAG features not available (sentence-transformers not installed)")
+        except Exception as e:
+            logger.warning(f"Failed to initialize RAG: {e}")
 
     def _init_schema(self):
         """Create database schema if not exists."""
@@ -125,7 +139,28 @@ class HistoryDatabase:
             WHERE id = ?
         """, (now, conversation_id))
 
+        # Auto-generate title from first user message
+        if role == "user" and content:
+            # Check if this conversation has a title
+            cursor.execute("SELECT title, message_count FROM conversations WHERE id = ?", (conversation_id,))
+            row = cursor.fetchone()
+            if row and not row[0]:  # No title yet
+                # Use first 60 chars of first user message as title
+                title = content.strip()[:60]
+                if len(content) > 60:
+                    title += "..."
+                cursor.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
+
         self.conn.commit()
+
+        # Add to RAG vector store if available (user and assistant messages only)
+        if self._rag_retriever and content and role in ["user", "assistant"]:
+            try:
+                message_id = cursor.lastrowid
+                self._rag_retriever.add_message(conversation_id, message_id, role, content)
+            except Exception as e:
+                # Don't fail the whole operation if RAG fails
+                logger.warning(f"Failed to add message to RAG: {e}")
 
     def get_recent_conversations(self, limit: int = 20, include_starred: bool = True) -> List[Dict]:
         """Get most recent conversations.
@@ -255,6 +290,36 @@ class HistoryDatabase:
             UPDATE conversations SET title = ? WHERE id = ?
         """, (title, conversation_id))
         self.conn.commit()
+
+    def retrieve_rag_context(
+        self,
+        conversation_id: int,
+        query: str,
+        n_results: int = 10,
+        exclude_recent: int = 20
+    ) -> List[Dict]:
+        """Retrieve relevant context using RAG semantic search.
+
+        Args:
+            conversation_id: ID of the conversation
+            query: Query text to find relevant context for
+            n_results: Number of results to return
+            exclude_recent: Exclude last N messages (they're sent verbatim)
+
+        Returns:
+            List of relevant message dicts
+        """
+        if not self._rag_retriever:
+            logger.debug("RAG not available, returning empty context")
+            return []
+
+        try:
+            return self._rag_retriever.retrieve_context(
+                conversation_id, query, n_results, exclude_recent
+            )
+        except Exception as e:
+            logger.warning(f"RAG retrieval failed: {e}")
+            return []
 
     def close(self):
         """Close database connection."""

@@ -73,9 +73,20 @@ class Agent:
 
         # Create or resume conversation in database
         if self.conversation_id:
-            # Resume existing conversation - load messages
+            # Resume existing conversation - load recent messages only
             messages = self.history_db.get_conversation_messages(self.conversation_id)
-            self.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+
+            # Use hybrid approach: last 20 messages verbatim, RAG for older context
+            # (RAG retrieval happens per-query in chat() method)
+            if len(messages) > 20:
+                # Load only recent messages to avoid context window issues
+                self.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages[-20:]]
+                self.session_logger.logger.info(
+                    f"Loaded last 20 of {len(messages)} messages. "
+                    f"RAG will retrieve relevant older context as needed."
+                )
+            else:
+                self.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
         else:
             # Create new conversation
             working_dir = os.getcwd()
@@ -152,11 +163,35 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             content=user_message
         )
 
-        # Prepare messages with system prompt
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            *self.messages
-        ]
+        # Retrieve relevant context using RAG (if available)
+        rag_context = []
+        if len(self.messages) > 20:  # Only use RAG if we have a long conversation
+            rag_context = self.history_db.retrieve_rag_context(
+                conversation_id=self.conversation_id,
+                query=user_message,
+                n_results=10,
+                exclude_recent=20
+            )
+            if rag_context:
+                self.session_logger.logger.info(f"Retrieved {len(rag_context)} relevant messages via RAG")
+
+        # Build context with system prompt + RAG context + recent messages
+        messages = [{"role": "system", "content": self.system_prompt}]
+
+        # Add RAG retrieved context if available
+        if rag_context:
+            rag_summary = "# Relevant Context from Earlier in Conversation:\n\n"
+            for ctx in rag_context:
+                role_label = "You" if ctx['role'] == "user" else "Assistant"
+                rag_summary += f"**{role_label}:** {ctx['content'][:200]}...\n\n"
+
+            messages.append({
+                "role": "system",
+                "content": rag_summary
+            })
+
+        # Add recent messages
+        messages.extend(self.messages)
 
         # Get tool definitions
         tools = self.tools.get_tool_definitions()

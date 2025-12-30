@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Optional, List, Dict
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Header, Footer, Input, TextArea, RichLog, Static, OptionList
+from textual.widgets import Header, Footer, Input, TextArea, RichLog, Static, OptionList, Label
 from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual import events
 from textual.message import Message
+from textual.screen import ModalScreen
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -115,10 +116,148 @@ except ImportError:
 from .thinking_indicator import ThinkingIndicator
 
 
+def relative_time(iso_timestamp: str) -> str:
+    """Convert ISO timestamp to relative time string like '2 hours ago'."""
+    from datetime import datetime, timedelta
+
+    dt = datetime.fromisoformat(iso_timestamp)
+    now = datetime.now()
+    diff = now - dt
+
+    if diff < timedelta(minutes=1):
+        return "just now"
+    elif diff < timedelta(hours=1):
+        minutes = int(diff.total_seconds() / 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    elif diff < timedelta(days=1):
+        hours = int(diff.total_seconds() / 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    elif diff < timedelta(days=7):
+        days = diff.days
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    elif diff < timedelta(days=30):
+        weeks = diff.days // 7
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    elif diff < timedelta(days=365):
+        months = diff.days // 30
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    else:
+        years = diff.days // 365
+        return f"{years} year{'s' if years != 1 else ''} ago"
+
+
+class HistorySelectScreen(ModalScreen[int]):
+    """Modal screen for selecting a conversation to continue."""
+
+    BINDINGS = [
+        ("escape,q", "dismiss", "Cancel"),
+    ]
+
+    CSS = """
+    HistorySelectScreen {
+        align: center middle;
+    }
+
+    #history-dialog {
+        width: 80;
+        height: 25;
+        border: thick $primary;
+        background: $surface;
+        padding: 1;
+    }
+
+    #history-title {
+        dock: top;
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #history-list {
+        height: 1fr;
+        border: solid $primary;
+    }
+
+    #history-help {
+        dock: bottom;
+        height: 1;
+        content-align: center middle;
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, conversations: List[Dict]):
+        super().__init__()
+        self.conversations = conversations
+
+    def compose(self) -> ComposeResult:
+        with Container(id="history-dialog"):
+            yield Label("📜 Resume Conversation", id="history-title")
+
+            # Build option list
+            options = []
+            for conv in self.conversations:
+                conv_id = conv['id']
+                time_ago = relative_time(conv['start_time'])
+                msg_count = conv['message_count']
+                title = conv['title'] or "New conversation"
+                working_dir = Path(conv['working_dir']).name
+                starred = "⭐ " if conv['starred'] else ""
+
+                # Truncate title if too long
+                max_title_len = 40
+                display_title = title[:max_title_len]
+                if len(title) > max_title_len:
+                    display_title = display_title[:max_title_len-3] + "..."
+
+                # Format: "• {title}  ({time} · {N} msgs · {dir})"
+                option_text = f"• {starred}{display_title}  ({time_ago} · {msg_count} msgs · {working_dir})"
+
+                options.append(Option(option_text, id=str(conv_id)))
+
+            yield OptionList(*options, id="history-list")
+            yield Label("↑/↓ to navigate • Enter to select • Esc/q to cancel", id="history-help")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Handle option selection."""
+        conv_id = int(event.option.id)
+        self.dismiss(conv_id)
+
+    def action_dismiss(self) -> None:
+        """Dismiss without selection."""
+        self.dismiss(None)
+
+
 class ChatApp(App):
     """CLIO chat application."""
 
     TITLE = "CLIO - Command Line Interactive Operator"
+
+    # Color mappings for normal and colorblind modes
+    COLOR_MAPS = {
+        "normal": {
+            "user_color": "cyan",
+            "user_title": "[bold cyan]You[/bold cyan]",
+            "assistant_color": "magenta",
+            "assistant_title": "[bold magenta]Assistant[/bold magenta]",
+            "system_color": "purple",
+            "system_title": "[bold purple]System[/bold purple]",
+            "tool_color": "dim cyan",
+        },
+        "colorblind": {
+            # Colorblind-friendly palette (blue/yellow/orange)
+            # Safe for deuteranopia, protanopia, and tritanopia
+            "user_color": "blue",
+            "user_title": "[bold blue]You[/bold blue]",
+            "assistant_color": "yellow",
+            "assistant_title": "[bold yellow]Assistant[/bold yellow]",
+            "system_color": "bright_yellow",
+            "system_title": "[bold bright_yellow]System[/bold bright_yellow]",
+            "tool_color": "dim blue",
+        }
+    }
 
     CSS = """
     Screen {
@@ -231,7 +370,16 @@ class ChatApp(App):
 
         # Display messages for responsive re-rendering on resize
         self.display_messages: List[tuple] = []  # (content, title, border_style)
-    
+
+        # For handling /history restart
+        self.selected_conversation_id: Optional[int] = None
+
+    def _get_colors(self) -> dict:
+        """Get color map based on colorblind mode setting."""
+        config = self.config_manager.load()
+        mode = "colorblind" if config.preferences.colorblind_mode else "normal"
+        return self.COLOR_MAPS[mode]
+
     def compose(self) -> ComposeResult:
         """Compose UI."""
         yield Header()
@@ -311,7 +459,6 @@ class ChatApp(App):
         self.command_router.register("/export", self._cmd_export)
         self.command_router.register("/history", self._cmd_history)
         self.command_router.register("/cleanup", self._cmd_cleanup)
-        self.command_router.register("/continue", self._cmd_continue)
         # /web handled specially in on_input_submitted - no command handler needed
     
     def _cmd_help(self, args: str) -> str:
@@ -319,7 +466,7 @@ class ChatApp(App):
         return """**Available Commands:**
 
 - `/help` - Show this help message
-- `/model` - List and switch models
+- `/model` - List and switch models (interactive)
 - `/clear` - Clear conversation history
 - `/exit` - Exit the application
 - `/files` - List files in context
@@ -328,8 +475,7 @@ class ChatApp(App):
 - `/config` - Show configuration
 - `/copy` - Copy last assistant response to clipboard
 - `/export [filename]` - Export conversation to markdown file
-- `/history` - List recent conversations
-- `/continue <id>` - Continue a previous conversation (exits current session)
+- `/history` - Resume a previous conversation (interactive selection)
 - `/cleanup` - Delete old conversations (keep only 20 most recent)
 - `/web <query>` - Search the web and get AI response
 
@@ -341,14 +487,18 @@ class ChatApp(App):
 - Hold **Shift** and drag with mouse to select text
 - Then use Ctrl+Shift+C (or Cmd+C on Mac) to copy
 
+**Accessibility:**
+- Enable colorblind mode in `~/.clio/config.json`:
+  - Set `"colorblind_mode": true` under `preferences`
+  - Uses blue/yellow/orange palette (safe for all colorblind types)
+
 **Examples:**
 - `Add error handling to @auth.py`
 - `/add src/`
 - `/model` to switch models
+- `/history` to resume a conversation
 - `/copy` to copy last response
 - `/export my-chat.md` to save conversation
-- `/history` to list recent conversations
-- `/continue 5` to resume conversation #5
 """
     
     def _cmd_clear(self, args: str) -> str:
@@ -531,30 +681,31 @@ class ChatApp(App):
             return f"❌ Failed to export: {e}"
 
     def _cmd_history(self, args: str) -> str:
-        """List recent conversations."""
+        """List recent conversations with interactive selection."""
+        # Launch the history selection screen in a worker
+        self.run_worker(self._show_history_screen(), exclusive=True)
+        return ""  # Return immediately, worker handles the rest
+
+    async def _show_history_screen(self):
+        """Worker method to show history selection screen."""
         db = HistoryDatabase()
         conversations = db.get_recent_conversations(limit=20)
         db.close()
 
         if not conversations:
-            return "No conversation history found."
+            colors = self._get_colors()
+            self._write_message("No conversation history found.", title=colors["system_title"], border_style=colors["system_color"])
+            return
 
-        lines = ["**📜 Recent Conversations (20 most recent):**\n"]
+        # Show modal screen for selection (now running in worker context)
+        selected_conv_id = await self.push_screen_wait(HistorySelectScreen(conversations))
 
-        for conv in conversations:
-            conv_id = conv['id']
-            start_time = datetime.fromisoformat(conv['start_time']).strftime('%Y-%m-%d %H:%M:%S')
-            model = conv['model']
-            msg_count = conv['message_count']
-            title = conv['title'] or f"Conversation in {Path(conv['working_dir']).name}"
-            starred = "⭐ " if conv['starred'] else ""
-
-            lines.append(f"\n**[{conv_id}]** {starred}{title}")
-            lines.append(f"  {start_time} | {model} | {msg_count} messages")
-
-        lines.append("\n\n💡 Type `/continue <id>` to resume a conversation")
-
-        return "\n".join(lines)
+        if selected_conv_id:
+            # User selected a conversation - set it and exit
+            # The CLI will detect this and restart with the selected conversation
+            self.selected_conversation_id = selected_conv_id
+            self.exit()
+        # If cancelled, just return (modal closes)
 
     def _cmd_cleanup(self, args: str) -> str:
         """Delete old conversations (keep only 20 most recent)."""
@@ -566,30 +717,6 @@ class ChatApp(App):
             return f"✓ Deleted {deleted} old conversation(s)"
         else:
             return "✓ No old conversations to delete"
-
-    def _cmd_continue(self, args: str) -> str:
-        """Continue a previous conversation."""
-        if not args.strip():
-            return "❌ Usage: /continue <id>\n\nUse `/history` to see available conversations"
-
-        try:
-            conversation_id = int(args.strip())
-        except ValueError:
-            return "❌ Invalid conversation ID. Must be a number."
-
-        # Verify conversation exists
-        db = HistoryDatabase()
-        conversations = db.get_recent_conversations(limit=100)
-        conv_ids = [c['id'] for c in conversations]
-        db.close()
-
-        if conversation_id not in conv_ids:
-            return f"❌ Conversation {conversation_id} not found.\n\nUse `/history` to see available conversations"
-
-        # Exit and restart with this conversation
-        return f"⚠️ To continue conversation {conversation_id}, please exit this session and run:\n\n  `clio --continue {conversation_id}`"
-
-    # _cmd_web removed - /web now flows through normal message path for proper tool display
 
     def _create_panel(self, content, title="", border_style="blue"):
         """Create a responsive panel that adapts to terminal width."""
@@ -683,11 +810,13 @@ class ChatApp(App):
             db.close()
 
             if messages:
+                colors = self._get_colors()
                 self._write_message(
                     f"[bold cyan]Resuming Conversation #{self.conversation_id}[/bold cyan]\n\n"
                     f"📝 Session log: [dim]{log_path}[/dim]\n\n"
                     f"[dim]Loaded {len(messages)} previous messages[/dim]",
-                    title="Welcome Back"
+                    title=colors["system_title"].replace("System", "Welcome Back"),
+                    border_style=colors["system_color"]
                 )
 
                 # Display conversation history
@@ -696,11 +825,11 @@ class ChatApp(App):
                     content = msg["content"]
 
                     if role == "user":
-                        self._write_message(content, title="[bold cyan]You[/bold cyan]", border_style="cyan")
+                        self._write_message(content, title=colors["user_title"], border_style=colors["user_color"])
                     elif role == "assistant":
                         # Skip empty assistant messages (tool calls with no response)
                         if content and content.strip():
-                            self._write_message(Markdown(content), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta")
+                            self._write_message(Markdown(content), title=colors["assistant_title"], border_style=colors["assistant_color"])
                     elif role == "tool":
                         # Show tool results in dim (truncate long results)
                         if len(content) > 200:
@@ -714,12 +843,14 @@ class ChatApp(App):
                 chat_log.write("[dim]─── End of previous conversation ───[/dim]\n")
         else:
             # New conversation
+            colors = self._get_colors()
             self._write_message(
                 "[bold cyan]CLIO[/bold cyan] - Command Line Interactive Operator\n\n"
                 "A self-hosted AI coding assistant.\n\n"
                 f"📝 Session log: [dim]{log_path}[/dim]\n\n"
                 "Type [bold]/help[/bold] for commands or start chatting!",
-                title="Welcome"
+                title=colors["system_title"].replace("System", "Welcome"),
+                border_style=colors["system_color"]
             )
 
         # Try to connect to IDE bridge (now that event loop is running)
@@ -965,8 +1096,8 @@ class ChatApp(App):
                 event.prevent_default()
                 return
 
-        # Submit on Enter (Shift+Enter for newline)
-        if event.key == "enter" and not event.shift:
+        # Submit on Enter (Shift+Enter handled by backslash above)
+        if event.key == "enter":
             self._debug_log(f"🔍 ENTER KEY PRESSED (not in autocomplete)")
             user_input = chat_input.text.strip()
             self._debug_log(f"🔍 user_input = '{user_input}'")
@@ -1025,8 +1156,10 @@ class ChatApp(App):
         """Process and send a user message."""
         self._debug_log(f"🔍 _process_message called with: '{user_input}'")
 
+        colors = self._get_colors()
+
         # Show user message
-        self._write_message(user_input, title="[bold cyan]You[/bold cyan]", border_style="cyan")
+        self._write_message(user_input, title=colors["user_title"], border_style=colors["user_color"])
 
         # Parse command or message
         command, args, original = self.command_router.parse(user_input)
@@ -1047,7 +1180,7 @@ class ChatApp(App):
             # Execute command
             result = await self.command_router.execute(command, args)
             self._debug_log(f"🔍 Command result: {result[:100]}...")
-            self._write_message(Markdown(result), title="[bold purple]System[/bold purple]", border_style="purple")
+            self._write_message(Markdown(result), title=colors["system_title"], border_style=colors["system_color"])
 
             # Add system message to history
             self.conversation_history.append({"role": "system", "content": result})
@@ -1076,7 +1209,7 @@ class ChatApp(App):
                 # Hide thinking indicator
                 thinking_indicator.add_class("hidden")
 
-                self._write_message(Markdown(response), title="[bold magenta]Assistant[/bold magenta]", border_style="magenta")
+                self._write_message(Markdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
 
                 # Save last response and add to history
                 self.last_assistant_response = response
@@ -1088,6 +1221,7 @@ class ChatApp(App):
                 # Get full traceback
                 tb = traceback.format_exc()
                 error_msg = f"**Error:**\n```\n{str(e)}\n\n{tb}\n```"
+                # Keep error as red - universal danger color
                 self._write_message(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red")
 
                 # Add error to history
@@ -1115,6 +1249,7 @@ class ChatApp(App):
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
         """Handle tool execution notification."""
         chat_log = self.query_one("#chat-log", RichLog)
+        colors = self._get_colors()
 
         # Format tool call nicely
         if tool_name == "edit_file":
@@ -1140,7 +1275,7 @@ class ChatApp(App):
 
         # Show tool call as a simple line (like Claude Code)
         from rich.text import Text
-        tool_line = Text(tool_display, style="dim cyan")
+        tool_line = Text(tool_display, style=colors["tool_color"])
         chat_log.write(tool_line)
     
     def action_clear(self) -> None:
