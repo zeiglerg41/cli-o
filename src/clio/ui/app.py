@@ -158,6 +158,84 @@ def relative_time(iso_timestamp: str) -> str:
         return f"{years} year{'s' if years != 1 else ''} ago"
 
 
+class GenericSelectScreen(ModalScreen):
+    """Generic modal screen for selecting from a list of options."""
+
+    BINDINGS = [
+        ("escape,q", "dismiss", "Cancel"),
+    ]
+
+    CSS = """
+    GenericSelectScreen {
+        align: center middle;
+    }
+
+    #select-dialog {
+        width: 80;
+        height: 25;
+        border: thick $primary;
+        background: $surface;
+        padding: 1;
+    }
+
+    #select-title {
+        dock: top;
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #select-list {
+        height: 1fr;
+        border: solid $primary;
+    }
+
+    #select-help {
+        dock: bottom;
+        height: 1;
+        content-align: center middle;
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, title: str, options: List[tuple], help_text: str = "↑/↓ to navigate • Enter to select • Esc/q to cancel"):
+        """Initialize generic select screen.
+
+        Args:
+            title: Title to display at top of dialog
+            options: List of tuples (display_text, value) where value is what gets returned
+            help_text: Help text to display at bottom
+        """
+        super().__init__()
+        self.title_text = title
+        self.options_data = options
+        self.help_text = help_text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="select-dialog"):
+            yield Label(self.title_text, id="select-title")
+
+            # Build option list from provided options
+            options = []
+            for i, (display_text, value) in enumerate(self.options_data):
+                options.append(Option(display_text, id=str(i)))
+
+            yield OptionList(*options, id="select-list")
+            yield Label(self.help_text, id="select-help")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Handle option selection."""
+        selected_index = int(event.option.id)
+        _, value = self.options_data[selected_index]
+        self.dismiss(value)
+
+    def action_dismiss(self) -> None:
+        """Dismiss without selection."""
+        self.dismiss(None)
+
+
 class HistorySelectScreen(ModalScreen[int]):
     """Modal screen for selecting a conversation to continue."""
 
@@ -399,6 +477,9 @@ class ChatApp(App):
         self.escape_pressed_once: bool = False
         self.escape_timer: Optional[asyncio.TimerHandle] = None
 
+        # Active query tracking for cancellation
+        self.current_query_worker = None
+
         # Tool call batching - collect multiple tool calls into one panel
         self.pending_tool_calls: List[str] = []
         self.tool_batch_timer: Optional[asyncio.TimerHandle] = None
@@ -503,7 +584,7 @@ class ChatApp(App):
         return """**Available Commands:**
 
 - `/help` - Show this help message
-- `/model` - List and switch models (interactive)
+- `/model` - Switch models (interactive selection)
 - `/clear` - Clear conversation history
 - `/exit` - Exit the application
 - `/config` - Show configuration
@@ -536,7 +617,7 @@ You can also use `@filename` syntax to reference files:
 
 **Examples:**
 - "Add error handling to @auth.py"
-- "/model" to switch models
+- "/model" to select a different model interactively
 - "/history" to resume a conversation
 - "/copy" to copy last response
 - "/export my-chat.md" to save conversation
@@ -556,7 +637,13 @@ You can also use `@filename` syntax to reference files:
         return "Goodbye!"
     
     async def _cmd_model(self, args: str) -> str:
-        """List/switch models with numbered selection."""
+        """List/switch models with interactive selection."""
+        # Launch the model selection screen in a worker
+        self.run_worker(self._show_model_screen(), exclusive=True)
+        return ""  # Return immediately, worker handles the rest
+
+    async def _show_model_screen(self):
+        """Worker method to show model selection screen."""
         config = self.config_manager.load()
 
         # Model pricing info (input/output per 1M tokens)
@@ -582,34 +669,32 @@ You can also use `@filename` syntax to reference files:
                 # Add pricing if available - use actual spacing for alignment
                 price_info = f"  {model_prices[model]}" if model in model_prices else ""
                 display_text = f"{marker} {model}{price_info}  @ {hostname}"
-                model_options.append((display_text, provider_name, model, is_current, hostname))
+                # Store tuple of (display_text, (provider_name, model, hostname))
+                model_options.append((display_text, (provider_name, model, hostname)))
 
-        # If args provided, try to switch by number
-        if args.strip():
-            try:
-                selection = int(args.strip())
-                if 1 <= selection <= len(model_options):
-                    _, provider, model, _, hostname = model_options[selection - 1]
-                    await self.agent.switch_model(provider, model)
-                    return f"✓ Switched to {model} @ {hostname}"
-                else:
-                    return f"❌ Invalid selection. Choose 1-{len(model_options)}"
-            except ValueError:
-                return "❌ Invalid input. Use a number like `/model 2`"
+        # Show modal screen for selection
+        selection = await self.push_screen_wait(
+            GenericSelectScreen(
+                title="🤖 Select Model",
+                options=model_options
+            )
+        )
 
-        # Show numbered list
-        lines = ["**Available Models:**\n"]
-        for i, (display, provider, model, is_current, hostname) in enumerate(model_options, 1):
-            lines.append(f"{i}. {display}")
+        if selection:
+            provider_name, model, hostname = selection
+            await self.agent.switch_model(provider_name, model)
 
-        # Get current provider config for hostname
-        current_provider_config = config.providers[self.agent.current_provider_name]
-        current_hostname = current_provider_config.hostname or current_provider_config.baseURL or self.agent.current_provider_name
+            colors = self._get_colors()
+            self._write_message(
+                f"✓ Switched to **{model}** @ {hostname}",
+                title=colors["system_title"],
+                border_style=colors["system_color"],
+                align="center"
+            )
 
-        lines.append(f"\n\n**Current:** {self.agent.current_model} @ {current_hostname}")
-        lines.append("\n💡 Type `/model <number>` to switch (e.g., `/model 2`)")
-
-        return "\n".join(lines)
+            # Update status bar
+            status_bar = self.query_one("#status-bar", Static)
+            status_bar.update(self._get_status_text())
     
     def _cmd_files(self, args: str) -> str:
         """List files in context."""
@@ -1083,6 +1168,33 @@ You can also use `@filename` syntax to reference files:
             chat_input.autocomplete_visible = False
             return
 
+        # If a query is currently running, cancel it
+        with open("/tmp/clio_cancel_debug.log", "a") as f:
+            f.write(f"\n=== ESCAPE PRESSED ===\n")
+            f.write(f"current_query_worker = {self.current_query_worker}\n")
+            if self.current_query_worker:
+                f.write(f"worker.is_finished = {self.current_query_worker.is_finished}\n")
+                f.write(f"worker.state = {self.current_query_worker.state}\n")
+
+        if self.current_query_worker and not self.current_query_worker.is_finished:
+            with open("/tmp/clio_cancel_debug.log", "a") as f:
+                f.write(f"ATTEMPTING TO CANCEL WORKER...\n")
+
+            self.current_query_worker.cancel()
+
+            with open("/tmp/clio_cancel_debug.log", "a") as f:
+                f.write(f"Worker.cancel() called\n")
+
+            colors = self._get_colors()
+            self._write_message(
+                Markdown("⚠️ **Query cancelled by user**"),
+                title=colors["system_title"],
+                border_style=colors["system_color"],
+                align="center"
+            )
+            self._reset_escape_state()
+            return
+
         # Handle double-tap to clear
         chat_input = self.query_one("#chat-input", AutocompleteTextArea)
         if self.escape_pressed_once:
@@ -1361,11 +1473,14 @@ You can also use `@filename` syntax to reference files:
             self._debug_log(f"🔍 Executing command: {command} with args: {args}")
             # Execute command
             result = await self.command_router.execute(command, args)
-            self._debug_log(f"🔍 Command result: {result[:100]}...")
-            self._write_message(Markdown(result), title=colors["system_title"], border_style=colors["system_color"], align="center")
+            self._debug_log(f"🔍 Command result: {result[:100] if result else '(empty)'}...")
 
-            # Add system message to history
-            self.conversation_history.append({"role": "system", "content": result})
+            # Only display and store result if it's not empty
+            # (Some commands like /model and /history handle their own display via workers)
+            if result and result.strip():
+                self._write_message(Markdown(result), title=colors["system_title"], border_style=colors["system_color"], align="center")
+                # Add system message to history
+                self.conversation_history.append({"role": "system", "content": result})
         else:
             # NOTE: @ mentions are kept in the message for the model to see
             # The model should use read_file tool when it encounters @filename
@@ -1385,47 +1500,19 @@ You can also use `@filename` syntax to reference files:
             thinking_indicator.reset_tokens()
             thinking_indicator.remove_class("hidden")
 
-            try:
-                # Use actual_message (transformed for /web or original for normal messages)
-                response = await self.agent.chat(actual_message, context)
+            # Use Textual worker for cancellable background operation (don't await!)
+            self.current_query_worker = self.run_worker(
+                self.agent.chat(actual_message, context),
+                exclusive=True,
+                name="chat_query"
+            )
 
-                # Get latest usage stats for this session to show in thinking indicator
-                session_usage = self.agent.history_db.get_session_usage(self.agent.conversation_id)
-                if session_usage:
-                    thinking_indicator.set_tokens(
-                        session_usage.get('prompt_tokens', 0),
-                        session_usage.get('completion_tokens', 0)
-                    )
+            with open("/tmp/clio_cancel_debug.log", "a") as f:
+                f.write(f"\n=== WORKER CREATED (not awaited) ===\n")
+                f.write(f"worker = {self.current_query_worker}\n")
+                f.write(f"worker.state = {self.current_query_worker.state}\n")
 
-                # Brief delay to show final token count before hiding
-                await asyncio.sleep(0.5)
-
-                # Hide thinking indicator
-                thinking_indicator.add_class("hidden")
-
-                # Flush any pending tool calls BEFORE showing the response
-                if self.tool_batch_timer:
-                    self.tool_batch_timer.stop()
-                    self.tool_batch_timer = None
-                self._flush_tool_calls()
-
-                self._write_message(Markdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
-
-                # Save last response and add to history
-                self.last_assistant_response = response
-                self.conversation_history.append({"role": "assistant", "content": response})
-            except Exception as e:
-                # Hide thinking indicator
-                thinking_indicator.add_class("hidden")
-
-                # Get full traceback
-                tb = traceback.format_exc()
-                error_msg = f"**Error:**\n```\n{str(e)}\n\n{tb}\n```"
-                # Keep error as red - universal danger color
-                self._write_message(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red", align="center")
-
-                # Add error to history
-                self.conversation_history.append({"role": "system", "content": f"Error: {str(e)}"})
+            # Worker runs in background - result handled in on_worker_state_changed
 
         # Update status
         status_bar = self.query_one("#status-bar", Static)
@@ -1443,6 +1530,75 @@ You can also use `@filename` syntax to reference files:
         # For now, batch with tool calls
         # Don't show permission requests - they're redundant with tool execution messages
         return True
+
+    def on_worker_state_changed(self, event) -> None:
+        """Handle worker state changes - process query results."""
+        # Only handle our chat_query worker
+        if event.worker.name != "chat_query":
+            return
+
+        colors = self._get_colors()
+        thinking_indicator = self.query_one("#thinking-indicator", ThinkingIndicator)
+
+        if event.state == event.worker.state.SUCCESS:
+            # Worker completed successfully
+            response = event.worker.result
+
+            # Get usage stats and update thinking indicator
+            session_usage = self.agent.history_db.get_session_usage(self.agent.conversation_id)
+            if session_usage:
+                thinking_indicator.set_tokens(
+                    session_usage.get('prompt_tokens', 0),
+                    session_usage.get('completion_tokens', 0)
+                )
+
+            # Brief delay then hide thinking indicator
+            self.set_timer(0.5, lambda: thinking_indicator.add_class("hidden"))
+
+            # Flush pending tool calls
+            if self.tool_batch_timer:
+                self.tool_batch_timer.stop()
+                self.tool_batch_timer = None
+            self._flush_tool_calls()
+
+            # Show response
+            self._write_message(Markdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
+
+            # Save to history
+            self.last_assistant_response = response
+            self.conversation_history.append({"role": "assistant", "content": response})
+
+            # Clear worker reference
+            self.current_query_worker = None
+
+        elif event.state == event.worker.state.CANCELLED:
+            # Worker was cancelled
+            thinking_indicator.add_class("hidden")
+
+            # Flush pending tool calls
+            if self.tool_batch_timer:
+                self.tool_batch_timer.stop()
+                self.tool_batch_timer = None
+            self._flush_tool_calls()
+
+            # Clear worker reference
+            self.current_query_worker = None
+
+        elif event.state == event.worker.state.ERROR:
+            # Worker had an error
+            thinking_indicator.add_class("hidden")
+
+            # Show error
+            error = event.worker.error
+            tb = traceback.format_exc()
+            error_msg = f"**Error:**\n```\n{str(error)}\n\n{tb}\n```"
+            self._write_message(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red", align="center")
+
+            # Add to history
+            self.conversation_history.append({"role": "system", "content": f"Error: {str(error)}"})
+
+            # Clear worker reference
+            self.current_query_worker = None
 
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
         """Handle tool execution notification - batches consecutive tool calls."""

@@ -1,4 +1,5 @@
 """Core agent implementation."""
+import asyncio
 import json
 import os
 import re
@@ -98,13 +99,13 @@ class Agent:
             # (RAG retrieval happens per-query in chat() method)
             if len(messages) > 20:
                 # Load only recent messages to avoid context window issues
-                self.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages[-20:]]
+                self.messages = self._reconstruct_messages(messages[-20:])
                 self.session_logger.logger.info(
                     f"Loaded last 20 of {len(messages)} messages. "
                     f"RAG will retrieve relevant older context as needed."
                 )
             else:
-                self.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+                self.messages = self._reconstruct_messages(messages)
         else:
             # Create new conversation
             working_dir = os.getcwd()
@@ -133,6 +134,78 @@ RESPONSE RULES (CRITICAL):
 - Execute tool calls immediately without narration
 
 Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory"""
+
+    def _reconstruct_messages(self, db_messages: List[Dict]) -> List[Message]:
+        """Reconstruct messages from database format to API format.
+
+        For old conversations, tool messages may not have tool_call_id saved.
+        We extract them from the preceding assistant's tool_calls and match them up.
+
+        Args:
+            db_messages: Messages from database with role, content, tool_calls, tool_call_id
+
+        Returns:
+            List of properly formatted messages for the API
+        """
+        reconstructed = []
+        pending_tool_call_ids = []  # Queue of tool_call_ids waiting for tool responses
+
+        # DEBUG: Log what we're reconstructing
+        with open("/tmp/clio_reconstruct_debug.log", "w") as f:
+            f.write(f"=== RECONSTRUCTING {len(db_messages)} MESSAGES ===\n")
+            for i, msg in enumerate(db_messages):
+                f.write(f"{i}: role={msg['role']}, has_tool_calls={bool(msg.get('tool_calls'))}, has_tool_call_id={bool(msg.get('tool_call_id'))}\n")
+
+        for i, msg in enumerate(db_messages):
+            message = {"role": msg["role"], "content": msg["content"]}
+
+            # Handle assistant messages with tool_calls
+            if msg["role"] == "assistant" and msg.get("tool_calls"):
+                try:
+                    tool_calls = json.loads(msg["tool_calls"])
+                    message["tool_calls"] = tool_calls
+
+                    # Extract tool_call_ids for matching with subsequent tool messages
+                    pending_tool_call_ids.extend([tc["id"] for tc in tool_calls])
+
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  {i}: Added {len(tool_calls)} pending tool_call_ids\n")
+                except (json.JSONDecodeError, TypeError):
+                    # If tool_calls is malformed, skip it
+                    self.session_logger.logger.warning("Malformed tool_calls JSON in database")
+                    pass
+
+            # Handle tool messages
+            elif msg["role"] == "tool":
+                if msg.get("tool_call_id"):
+                    # New format: tool_call_id is saved in database
+                    message["tool_call_id"] = msg["tool_call_id"]
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  {i}: Using saved tool_call_id\n")
+                elif pending_tool_call_ids:
+                    # Old format: reconstruct by matching with pending tool_call_ids
+                    message["tool_call_id"] = pending_tool_call_ids.pop(0)
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  {i}: Reconstructed tool_call_id (pending left: {len(pending_tool_call_ids)})\n")
+                    self.session_logger.logger.info(
+                        f"Reconstructed tool_call_id for old tool message"
+                    )
+                else:
+                    # Orphaned tool message with no preceding assistant tool_call
+                    # This shouldn't happen but handle gracefully by skipping
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  {i}: SKIPPING orphaned tool message\n")
+                    self.session_logger.logger.warning(
+                        "Skipping orphaned tool message (no matching tool_call_id)"
+                    )
+                    continue
+
+            reconstructed.append(message)
+
+        with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+            f.write(f"\n=== FINAL: {len(reconstructed)} messages reconstructed ===\n")
+
+        return reconstructed
 
     async def switch_model(self, provider_name: str, model: str) -> None:
         """Switch to a different provider and model."""
@@ -291,6 +364,9 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                     model=self.current_model,
                     tools=tools
                 )
+            except asyncio.CancelledError:
+                # Re-raise cancellation to propagate to UI
+                raise
             except Exception as e:
                 error_msg = f"❌ API Error: {str(e)}"
                 self.session_logger.log_error(error_msg)
@@ -396,7 +472,8 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                     self.history_db.add_message(
                         conversation_id=self.conversation_id,
                         role="tool",
-                        content=result
+                        content=result,
+                        tool_call_id=tool_call["id"]
                     )
 
         error_msg = "Max iterations reached"

@@ -67,10 +67,19 @@ class HistoryDatabase:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 tool_calls TEXT,
+                tool_call_id TEXT,
                 tokens INTEGER,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             )
         """)
+
+        # Migrate existing database: add tool_call_id column if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists, ignore
+            pass
 
         # Usage stats table
         cursor.execute("""
@@ -135,7 +144,7 @@ class HistoryDatabase:
         return cursor.lastrowid
 
     def add_message(self, conversation_id: int, role: str, content: Optional[str] = None,
-                    tool_calls: Optional[str] = None, tokens: Optional[int] = None):
+                    tool_calls: Optional[str] = None, tool_call_id: Optional[str] = None, tokens: Optional[int] = None):
         """Add a message to a conversation.
 
         Args:
@@ -143,6 +152,7 @@ class HistoryDatabase:
             role: Message role (user/assistant/system/tool)
             content: Message content (defaults to empty string if None)
             tool_calls: JSON string of tool calls if any
+            tool_call_id: Tool call ID (for tool role messages)
             tokens: Token count if available
         """
         cursor = self.conn.cursor()
@@ -153,9 +163,9 @@ class HistoryDatabase:
             content = ""
 
         cursor.execute("""
-            INSERT INTO messages (conversation_id, timestamp, role, content, tool_calls, tokens)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (conversation_id, now, role, content, tool_calls, tokens))
+            INSERT INTO messages (conversation_id, timestamp, role, content, tool_calls, tool_call_id, tokens)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (conversation_id, now, role, content, tool_calls, tool_call_id, tokens))
 
         # Update message count
         cursor.execute("""
