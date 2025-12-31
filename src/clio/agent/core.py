@@ -239,6 +239,25 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         # Update config
         self.config_manager.set_default_model(provider_name, model)
 
+    async def _save_message_with_rag(self, conversation_id: int, role: str, content: str,
+                                     tool_calls: Optional[str] = None, tool_call_id: Optional[str] = None):
+        """Save message with RAG in background (fire-and-forget).
+
+        Logs when RAG model is loaded for the first time.
+        """
+        try:
+            rag_model_loaded = await self.history_db.add_message_async(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                tool_calls=tool_calls,
+                tool_call_id=tool_call_id
+            )
+            if rag_model_loaded:
+                self.session_logger.logger.info("✓ RAG embedding model loaded successfully (one-time setup)")
+        except Exception as e:
+            self.session_logger.logger.error(f"Failed to save message with RAG: {e}")
+
     def _calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
         """Calculate cost in USD for a model request.
 
@@ -290,12 +309,12 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             "content": user_message
         })
 
-        # Save user message to history
-        self.history_db.add_message(
+        # Save user message to history (fire-and-forget - don't wait for RAG model loading)
+        asyncio.create_task(self._save_message_with_rag(
             conversation_id=self.conversation_id,
             role="user",
             content=user_message
-        )
+        ))
 
         # Retrieve relevant context using RAG (if available)
         rag_context = []
@@ -310,7 +329,12 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 self.session_logger.logger.info(f"Retrieved {len(rag_context)} relevant messages via RAG")
 
         # Build context with system prompt + RAG context + recent messages
-        messages = [{"role": "system", "content": self.system_prompt}]
+        # Add current date to system prompt dynamically
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")  # e.g., "December 31, 2025"
+        system_prompt_with_date = f"{self.system_prompt}\n\nCurrent date: {current_date}"
+
+        messages = [{"role": "system", "content": system_prompt_with_date}]
 
         # Add RAG retrieved context if available
         if rag_context:
@@ -415,14 +439,14 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             self.messages.append(message)
             messages.append(message)
 
-            # Save assistant message to history
+            # Save assistant message to history (fire-and-forget)
             tool_calls_json = json.dumps(message.get("tool_calls")) if message.get("tool_calls") else None
-            self.history_db.add_message(
+            asyncio.create_task(self._save_message_with_rag(
                 conversation_id=self.conversation_id,
                 role="assistant",
                 content=message.get("content", ""),
                 tool_calls=tool_calls_json
-            )
+            ))
 
             # Check if done (only stop if no tool calls)
             if not message.get("tool_calls"):
@@ -468,13 +492,13 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                     self.messages.append(tool_message)
                     messages.append(tool_message)
 
-                    # Save tool result to history
-                    self.history_db.add_message(
+                    # Save tool result to history (fire-and-forget)
+                    asyncio.create_task(self._save_message_with_rag(
                         conversation_id=self.conversation_id,
                         role="tool",
                         content=result,
                         tool_call_id=tool_call["id"]
-                    )
+                    ))
 
         error_msg = "Max iterations reached"
         self.session_logger.log_error(error_msg)

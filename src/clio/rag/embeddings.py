@@ -1,9 +1,14 @@
 """Embedding generation for conversation messages."""
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Global thread pool for model loading
+_thread_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag_model")
 
 
 class EmbeddingManager:
@@ -13,16 +18,57 @@ class EmbeddingManager:
         """Initialize embedding manager with lazy model loading."""
         self._model = None
         self._model_name = "all-MiniLM-L6-v2"
+        self._loading = False
+        self._load_task = None
+
+    def _load_model_sync(self):
+        """Synchronous model loading (runs in thread pool)."""
+        from sentence_transformers import SentenceTransformer
+        logger.info(f"Loading embedding model: {self._model_name}")
+        model = SentenceTransformer(self._model_name)
+        logger.info("Embedding model loaded successfully")
+        return model
+
+    async def load_model_async(self) -> bool:
+        """Asynchronously load the embedding model in background thread.
+
+        Returns:
+            True if model loaded successfully, False otherwise
+        """
+        if self._model is not None:
+            return True  # Already loaded
+
+        if self._loading:
+            # Already loading, wait for it
+            if self._load_task:
+                await self._load_task
+            return self._model is not None
+
+        self._loading = True
+        try:
+            loop = asyncio.get_event_loop()
+            self._load_task = loop.run_in_executor(_thread_pool, self._load_model_sync)
+            self._model = await self._load_task
+            return True
+        except ImportError:
+            logger.warning(
+                "sentence-transformers not installed. RAG features disabled. "
+                "Install with: pip install sentence-transformers"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            return False
+        finally:
+            self._loading = False
+            self._load_task = None
 
     @property
     def model(self):
-        """Lazy-load the sentence transformer model."""
+        """Lazy-load the sentence transformer model (synchronous fallback)."""
         if self._model is None:
             try:
-                from sentence_transformers import SentenceTransformer
-                logger.info(f"Loading embedding model: {self._model_name}")
-                self._model = SentenceTransformer(self._model_name)
-                logger.info("Embedding model loaded successfully")
+                self._model = self._load_model_sync()
             except ImportError:
                 logger.warning(
                     "sentence-transformers not installed. RAG features disabled. "
@@ -33,6 +79,10 @@ class EmbeddingManager:
                 logger.error(f"Failed to load embedding model: {e}")
                 raise
         return self._model
+
+    def is_loaded(self) -> bool:
+        """Check if model is already loaded."""
+        return self._model is not None
 
     def is_available(self) -> bool:
         """Check if RAG features are available."""

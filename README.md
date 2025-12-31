@@ -135,6 +135,60 @@ The default configuration is set up to use a local Ollama instance. If you have 
 
 To add a new provider (e.g., a remote OpenAI-compatible API), you can use the `add-provider` command or edit the JSON file directly.
 
+### Getting Actual Billing Data
+
+By default, the `/usage` command shows accurate token counts but **estimated costs** based on published pricing. To get **actual billing amounts** from your provider:
+
+#### For OpenAI
+
+1. **Get an Admin API Key**:
+   - Go to https://platform.openai.com/api-keys
+   - Create a new key with "Admin" permissions
+   - Copy the key (starts with `sk-proj-...`)
+
+2. **Add to your config** at `~/.clio/config.json`:
+   ```json
+   {
+     "providers": {
+       "openai": {
+         "type": "openai",
+         "baseURL": "https://api.openai.com/v1",
+         "apiKey": "sk-proj-YOUR-REGULAR-KEY-HERE",
+         "adminApiKey": "sk-proj-YOUR-ADMIN-KEY-HERE",
+         "models": ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+       }
+     }
+   }
+   ```
+
+3. **Reload clio** - The `/usage` command will now fetch actual costs from OpenAI's billing API.
+
+#### For Anthropic (Claude)
+
+1. **Get an Admin API Key**:
+   - Go to https://console.anthropic.com/settings/keys
+   - Create a new key with Admin role
+   - Copy the key (starts with `sk-ant-admin-...`)
+
+2. **Add to your config**:
+   ```json
+   {
+     "providers": {
+       "anthropic": {
+         "type": "anthropic",
+         "baseURL": "https://api.anthropic.com/v1",
+         "apiKey": "sk-ant-YOUR-REGULAR-KEY",
+         "adminApiKey": "sk-ant-admin-YOUR-ADMIN-KEY",
+         "models": ["claude-3-opus", "claude-3-sonnet"]
+       }
+     }
+   }
+   ```
+
+3. **Reload clio** - The `/usage` command will now show actual billing data.
+
+**Note**: Admin API keys have elevated permissions. Store them securely and never commit them to version control.
+
 ---
 
 ## Commands

@@ -1,5 +1,6 @@
 """Context retrieval using semantic search."""
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import chromadb
@@ -64,8 +65,57 @@ class ContextRetriever:
             logger.error(f"Failed to get/create collection: {e}")
             raise
 
+    async def add_message_async(self, conversation_id: int, message_id: int, role: str, content: str) -> bool:
+        """Add a message to the vector store asynchronously.
+
+        Loads the embedding model in background thread if needed (first time).
+
+        Args:
+            conversation_id: ID of the conversation
+            message_id: ID of the message
+            role: Message role (user/assistant)
+            content: Message content
+
+        Returns:
+            True if model needed loading (so caller can show status), False otherwise
+        """
+        if not content or not content.strip():
+            return False
+
+        # Check if model needs loading
+        needs_loading = not self.embedding_manager.is_loaded()
+
+        try:
+            # Load model asynchronously if needed (first time)
+            if needs_loading:
+                logger.info("First RAG message - loading embedding model in background...")
+                success = await self.embedding_manager.load_model_async()
+                if not success:
+                    return False
+
+            # Generate embedding (model is now loaded)
+            embedding = self.embedding_manager.embed_text(content)
+            if embedding is None:
+                logger.warning(f"Failed to generate embedding for message {message_id}")
+                return needs_loading
+
+            # Add to collection
+            collection = self.get_collection(conversation_id)
+            collection.add(
+                ids=[f"msg_{message_id}"],
+                embeddings=[embedding],
+                documents=[content],
+                metadatas=[{"role": role, "message_id": message_id}]
+            )
+            logger.debug(f"Added message {message_id} to vector store")
+            return needs_loading
+
+        except Exception as e:
+            logger.error(f"Failed to add message to vector store: {e}")
+            return needs_loading
+
     def add_message(self, conversation_id: int, message_id: int, role: str, content: str):
-        """Add a message to the vector store.
+        """Add a message to the vector store (synchronous version).
 
         Args:
             conversation_id: ID of the conversation

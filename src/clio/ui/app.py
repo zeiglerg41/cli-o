@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Dict
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Header, Footer, Input, TextArea, RichLog, Static, OptionList, Label
+from textual.widgets import Header, Footer, Input, TextArea, RichLog, Static, OptionList, Label, Markdown
 from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual import events
@@ -334,8 +334,8 @@ class ChatApp(App):
             "assistant_title": "[bold magenta]Clio[/bold magenta]",
             "system_color": "purple",
             "system_title": "[bold purple]System[/bold purple]",
-            "tool_color": "dim cyan",
-            "tool_title": "[bold dim cyan]Tool[/bold dim cyan]",
+            "tool_color": "dim",
+            "tool_title": "[bold dim]Tool[/bold dim]",
         },
         "colorblind": {
             # Colorblind-friendly palette (blue/yellow/orange)
@@ -346,8 +346,8 @@ class ChatApp(App):
             "assistant_title": "[bold yellow]Clio[/bold yellow]",
             "system_color": "bright_yellow",
             "system_title": "[bold bright_yellow]System[/bold bright_yellow]",
-            "tool_color": "dim blue",
-            "tool_title": "[bold dim blue]Tool[/bold dim blue]",
+            "tool_color": "dim",
+            "tool_title": "[bold dim]Tool[/bold dim]",
         }
     }
 
@@ -377,6 +377,18 @@ class ChatApp(App):
     }
 
     #thinking-indicator.hidden {
+        display: none;
+    }
+
+    #tool-calls-panel {
+        height: auto;
+        width: 100%;
+        padding: 1 2;
+        border: solid $primary;
+        margin-bottom: 1;
+    }
+
+    #tool-calls-panel.hidden {
         display: none;
     }
 
@@ -480,9 +492,9 @@ class ChatApp(App):
         # Active query tracking for cancellation
         self.current_query_worker = None
 
-        # Tool call batching - collect multiple tool calls into one panel
-        self.pending_tool_calls: List[str] = []
-        self.tool_batch_timer: Optional[asyncio.TimerHandle] = None
+        # Tool call streaming - track accumulated tool calls for current response
+        self.current_tool_calls_text: str = ""
+        self.current_tool_calls_widget = None
 
         # Display messages for responsive re-rendering on resize
         self.display_messages: List[tuple] = []  # (content, title, border_style)
@@ -508,6 +520,9 @@ class ChatApp(App):
 
         # Thinking indicator (hidden by default)
         yield ThinkingIndicator(id="thinking-indicator", classes="hidden")
+
+        # Tool calls panel (hidden by default, shown during tool execution)
+        yield Static("", id="tool-calls-panel", classes="hidden")
 
         # Input with soft wrapping
         with Container(id="input-container"):
@@ -863,15 +878,42 @@ You can also use `@filename` syntax to reference files:
         """Show usage statistics and costs."""
         from datetime import datetime
 
-        # Get monthly usage
+        # Get monthly usage from local database
         monthly_usage = self.agent.history_db.get_monthly_usage()
 
         if not monthly_usage:
             return "No usage data for this month yet."
 
+        # Check if we have an admin API key to fetch actual costs
+        config = self.config_manager.load()
+        current_provider_config = config.providers.get(self.agent.current_provider_name)
+        admin_api_key = current_provider_config.adminApiKey if current_provider_config else None
+
+        actual_costs = None
+        using_actual_costs = False
+
+        if admin_api_key and current_provider_config.type == "openai":
+            # Fetch actual costs from OpenAI billing API
+            try:
+                from ..billing import fetch_openai_costs
+                actual_costs = fetch_openai_costs(admin_api_key)
+                using_actual_costs = True
+            except Exception as e:
+                # Fall back to estimated costs if API fails
+                pass
+
         # Format table
         month_name = datetime.now().strftime("%B %Y")
         lines = [f"📊 **{month_name} Usage**\n"]
+
+        # Add note about pricing source
+        if using_actual_costs:
+            lines.append("_✅ Showing actual billing data from provider API._")
+            lines.append("_Models marked with * were used outside clio (no token counts available)._\n")
+        else:
+            lines.append("_Note: Token counts are accurate. Costs are estimated based on published pricing._")
+            lines.append("_For actual billing data, add an admin API key to your config. See README for details._\n")
+
         lines.append("```")
 
         # Table header with fixed column widths
@@ -882,16 +924,24 @@ You can also use `@filename` syntax to reference files:
         total_in = 0
         total_out = 0
         total_cost = 0.0
+        models_shown = set()
 
+        # First show models from database usage
         for row in monthly_usage:
             model = row['model']
             in_tokens = row['prompt_tokens']
             out_tokens = row['completion_tokens']
-            cost = row['total_cost']
+
+            # Use actual cost if available, otherwise use estimated cost
+            if using_actual_costs and actual_costs and model in actual_costs:
+                cost = actual_costs[model]
+            else:
+                cost = row['total_cost']
 
             total_in += in_tokens
             total_out += out_tokens
             total_cost += cost
+            models_shown.add(model)
 
             # Format tokens (K for thousands)
             in_k = f"{in_tokens / 1000:.1f}K" if in_tokens >= 1000 else str(in_tokens)
@@ -901,6 +951,18 @@ You can also use `@filename` syntax to reference files:
             model_display = model[:16].ljust(16)
 
             lines.append(f"{model_display} {in_k:>10} {out_k:>12} ${cost:>7.2f}")
+
+        # Add "Other" row for models from actual_costs that weren't used through clio
+        if using_actual_costs and actual_costs:
+            other_cost = 0.0
+            for model, cost in actual_costs.items():
+                if model not in models_shown:
+                    other_cost += cost
+
+            if other_cost > 0:
+                total_cost += other_cost
+                model_display = "Other *".ljust(16)  # * indicates external usage
+                lines.append(f"{model_display} {'—':>10} {'—':>12} ${other_cost:>7.2f}")
 
         # Total row
         lines.append("")  # Blank line before total
@@ -1537,12 +1599,15 @@ You can also use `@filename` syntax to reference files:
         if event.worker.name != "chat_query":
             return
 
+        from rich.markdown import Markdown as RichMarkdown
+
         colors = self._get_colors()
         thinking_indicator = self.query_one("#thinking-indicator", ThinkingIndicator)
 
         if event.state == event.worker.state.SUCCESS:
             # Worker completed successfully
             response = event.worker.result
+            chat_log = self.query_one("#chat-log", RichLog)
 
             # Get usage stats and update thinking indicator
             session_usage = self.agent.history_db.get_session_usage(self.agent.conversation_id)
@@ -1555,14 +1620,22 @@ You can also use `@filename` syntax to reference files:
             # Brief delay then hide thinking indicator
             self.set_timer(0.5, lambda: thinking_indicator.add_class("hidden"))
 
-            # Flush pending tool calls
-            if self.tool_batch_timer:
-                self.tool_batch_timer.stop()
-                self.tool_batch_timer = None
-            self._flush_tool_calls()
+            # Finalize tool calls if any were executed
+            if self.current_tool_calls_text:
+                # Copy tool calls to chat log
+                self._write_message(
+                    RichMarkdown(self.current_tool_calls_text),
+                    title=colors["system_title"].replace("System", "Tools"),
+                    border_style=colors["system_color"],
+                    align="center"
+                )
+                # Hide and reset the tool calls panel
+                tool_panel = self.query_one("#tool-calls-panel", Static)
+                tool_panel.add_class("hidden")
+                self.current_tool_calls_text = ""
 
-            # Show response
-            self._write_message(Markdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
+            # Write assistant response
+            self._write_message(RichMarkdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
 
             # Save to history
             self.last_assistant_response = response
@@ -1575,11 +1648,11 @@ You can also use `@filename` syntax to reference files:
             # Worker was cancelled
             thinking_indicator.add_class("hidden")
 
-            # Flush pending tool calls
-            if self.tool_batch_timer:
-                self.tool_batch_timer.stop()
-                self.tool_batch_timer = None
-            self._flush_tool_calls()
+            # Reset tool calls panel
+            if self.current_tool_calls_text:
+                tool_panel = self.query_one("#tool-calls-panel", Static)
+                tool_panel.add_class("hidden")
+                self.current_tool_calls_text = ""
 
             # Clear worker reference
             self.current_query_worker = None
@@ -1587,6 +1660,12 @@ You can also use `@filename` syntax to reference files:
         elif event.state == event.worker.state.ERROR:
             # Worker had an error
             thinking_indicator.add_class("hidden")
+
+            # Reset tool calls panel
+            if self.current_tool_calls_text:
+                tool_panel = self.query_one("#tool-calls-panel", Static)
+                tool_panel.add_class("hidden")
+                self.current_tool_calls_text = ""
 
             # Show error
             error = event.worker.error
@@ -1601,7 +1680,7 @@ You can also use `@filename` syntax to reference files:
             self.current_query_worker = None
 
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
-        """Handle tool execution notification - batches consecutive tool calls."""
+        """Handle tool execution notification - streams to live panel."""
         # Format tool call nicely
         if tool_name == "edit_file":
             path = arguments.get("path", "unknown")
@@ -1624,38 +1703,22 @@ You can also use `@filename` syntax to reference files:
         else:
             tool_display = f"🔧 **{tool_name}**: {arguments}"
 
-        # Add to pending tool calls
-        self.pending_tool_calls.append(tool_display)
+        # Get the tool calls panel
+        tool_panel = self.query_one("#tool-calls-panel", Static)
 
-        # Cancel existing timer if any
-        if self.tool_batch_timer:
-            self.tool_batch_timer.stop()
+        # If this is the first tool call, show the panel and initialize
+        if not self.current_tool_calls_text:
+            colors = self._get_colors()
+            # Set title with proper color
+            tool_panel.remove_class("hidden")
+            self.current_tool_calls_text = f"**Tools Executed:**\n\n{tool_display}"
+        else:
+            # Append to existing tool calls (double newline for Markdown line break)
+            self.current_tool_calls_text += f"\n\n{tool_display}"
 
-        # Set timer to flush after 100ms of no new tool calls
-        self.tool_batch_timer = self.set_timer(0.1, self._flush_tool_calls)
-
-    def _flush_tool_calls(self) -> None:
-        """Display all batched tool calls in one panel."""
-        if not self.pending_tool_calls:
-            return
-
-        colors = self._get_colors()
-
-        # Combine all tool calls with newlines
-        combined = "\n".join(self.pending_tool_calls)
-
-        # Display in one panel using system colors (purple)
-        from rich.markdown import Markdown
-        self._write_message(
-            Markdown(combined),
-            title=colors["system_title"].replace("System", "Tools"),
-            border_style=colors["system_color"],
-            align="center"
-        )
-
-        # Clear the pending list
-        self.pending_tool_calls.clear()
-        self.tool_batch_timer = None
+        # Update the panel with all accumulated tool calls using Markdown renderable
+        from rich.markdown import Markdown as RichMarkdown
+        tool_panel.update(RichMarkdown(self.current_tool_calls_text))
 
     def action_clear(self) -> None:
         """Clear chat log."""
@@ -1665,3 +1728,8 @@ You can also use `@filename` syntax to reference files:
         self.agent.clear_history()
         self.conversation_history.clear()
         self.last_assistant_response = ""
+
+        # Reset tool calls panel
+        tool_panel = self.query_one("#tool-calls-panel", Static)
+        tool_panel.add_class("hidden")
+        self.current_tool_calls_text = ""

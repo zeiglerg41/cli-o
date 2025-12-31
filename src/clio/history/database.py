@@ -1,5 +1,6 @@
 """SQLite database for conversation history."""
 import sqlite3
+import asyncio
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
@@ -197,6 +198,70 @@ class HistoryDatabase:
             except Exception as e:
                 # Don't fail the whole operation if RAG fails
                 logger.warning(f"Failed to add message to RAG: {e}")
+
+    async def add_message_async(self, conversation_id: int, role: str, content: Optional[str] = None,
+                                tool_calls: Optional[str] = None, tool_call_id: Optional[str] = None,
+                                tokens: Optional[int] = None) -> bool:
+        """Add a message to a conversation asynchronously (with async RAG).
+
+        Returns True if RAG model needed loading (first time), False otherwise.
+
+        Args:
+            conversation_id: ID of the conversation
+            role: Message role (user/assistant/system/tool)
+            content: Message content (defaults to empty string if None)
+            tool_calls: JSON string of tool calls if any
+            tool_call_id: Tool call ID (for tool role messages)
+            tokens: Token count if available
+
+        Returns:
+            True if RAG model was loaded (so caller can show status message)
+        """
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+
+        # Default to empty string if content is None
+        if content is None:
+            content = ""
+
+        cursor.execute("""
+            INSERT INTO messages (conversation_id, timestamp, role, content, tool_calls, tool_call_id, tokens)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (conversation_id, now, role, content, tool_calls, tool_call_id, tokens))
+
+        # Update message count
+        cursor.execute("""
+            UPDATE conversations
+            SET message_count = message_count + 1,
+                end_time = ?
+            WHERE id = ?
+        """, (now, conversation_id))
+
+        # Auto-generate title from first user message
+        if role == "user" and content:
+            cursor.execute("SELECT title, message_count FROM conversations WHERE id = ?", (conversation_id,))
+            row = cursor.fetchone()
+            if row and not row[0]:  # No title yet
+                title = content.strip()[:60]
+                if len(content) > 60:
+                    title += "..."
+                cursor.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
+
+        self.conn.commit()
+
+        # Add to RAG vector store asynchronously if available
+        model_was_loaded = False
+        if self._rag_retriever and content and role in ["user", "assistant"]:
+            try:
+                message_id = cursor.lastrowid
+                model_was_loaded = await self._rag_retriever.add_message_async(
+                    conversation_id, message_id, role, content
+                )
+            except Exception as e:
+                # Don't fail the whole operation if RAG fails
+                logger.warning(f"Failed to add message to RAG: {e}")
+
+        return model_was_loaded
 
     def get_recent_conversations(self, limit: int = 20, include_starred: bool = True) -> List[Dict]:
         """Get most recent conversations.
