@@ -121,6 +121,24 @@ class HistoryDatabase:
 
         self.conn.commit()
 
+    def _generate_title_if_needed(self, cursor, conversation_id: int, content: str, role: str):
+        """Auto-generate title from first user message if none exists.
+
+        Args:
+            cursor: Database cursor
+            conversation_id: ID of the conversation
+            content: Message content
+            role: Message role
+        """
+        if role == "user" and content:
+            cursor.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,))
+            row = cursor.fetchone()
+            if row and not row[0]:  # No title yet
+                title = content.strip()[:60]
+                if len(content) > 60:
+                    title += "..."
+                cursor.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
+
     def create_conversation(self, working_dir: str, model: str, provider: str, title: Optional[str] = None) -> int:
         """Create a new conversation.
 
@@ -177,16 +195,7 @@ class HistoryDatabase:
         """, (now, conversation_id))
 
         # Auto-generate title from first user message
-        if role == "user" and content:
-            # Check if this conversation has a title
-            cursor.execute("SELECT title, message_count FROM conversations WHERE id = ?", (conversation_id,))
-            row = cursor.fetchone()
-            if row and not row[0]:  # No title yet
-                # Use first 60 chars of first user message as title
-                title = content.strip()[:60]
-                if len(content) > 60:
-                    title += "..."
-                cursor.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
+        self._generate_title_if_needed(cursor, conversation_id, content, role)
 
         self.conn.commit()
 
@@ -238,14 +247,7 @@ class HistoryDatabase:
         """, (now, conversation_id))
 
         # Auto-generate title from first user message
-        if role == "user" and content:
-            cursor.execute("SELECT title, message_count FROM conversations WHERE id = ?", (conversation_id,))
-            row = cursor.fetchone()
-            if row and not row[0]:  # No title yet
-                title = content.strip()[:60]
-                if len(content) > 60:
-                    title += "..."
-                cursor.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
+        self._generate_title_if_needed(cursor, conversation_id, content, role)
 
         self.conn.commit()
 

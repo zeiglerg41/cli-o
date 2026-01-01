@@ -47,7 +47,7 @@ src/clio/agent/session_logger.py (~100) - Per-session logging
 
 ---
 
-## 📍 GROUP 3: Data Persistence (800 lines)
+## 📍 GROUP 3: Data Persistence (800 lines) ✅ COMPLETE
 **Why third:** Called frequently. Database operations are often bottlenecks.
 
 ```
@@ -62,6 +62,15 @@ src/clio/rag/embeddings.py    (~150 lines) - Sentence transformers model
 - RAG model loading (already optimized but verify)
 - Query efficiency
 - Excessive get_session_usage() calls
+
+**Changes implemented:**
+1. ✅ Fixed bare except in embeddings.py (better error logging)
+2. ✅ Removed debug logging in hot path (retriever.py - 2 lines)
+3. ✅ Extracted title generation helper method (database.py - removed ~16 lines duplication)
+4. ✅ Added collection caching per conversation_id (retriever.py - performance improvement)
+5. ✅ Consolidated add_message methods (retriever.py - removed ~14 lines duplication)
+
+**Total impact:** ~30 lines removed, improved caching, better maintainability
 
 ---
 
@@ -134,8 +143,8 @@ src/clio/vscode_protocol.py         (~50 lines)  - VSCode protocol
 ## 🎯 Current Status
 
 - [x] GROUP 1: UI Layer - **COMPLETE** (Phase 1: Quick wins done - removed ~97 lines, cached colors)
-- [x] GROUP 2: Agent Core + Tools - **AUDIT COMPLETE** (found debug logs + datetime import issues)
-- [ ] GROUP 3: Data Persistence
+- [x] GROUP 2: Agent Core + Tools - **COMPLETE** (found debug logs + datetime import issues)
+- [x] GROUP 3: Data Persistence - **COMPLETE** (removed ~30 lines, added caching, consolidated duplicate code)
 - [ ] GROUP 4: Provider Layer
 - [ ] GROUP 5: Config & Context
 - [ ] GROUP 6: Entry Points

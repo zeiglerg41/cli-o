@@ -28,7 +28,7 @@ class ContextRetriever:
 
         self.embedding_manager = EmbeddingManager()
         self._client = None
-        self._collection = None
+        self._collection_cache = {}  # Cache collections by conversation_id
 
     @property
     def client(self):
@@ -46,7 +46,7 @@ class ContextRetriever:
         return self._client
 
     def get_collection(self, conversation_id: int):
-        """Get or create collection for a conversation.
+        """Get or create collection for a conversation (with caching).
 
         Args:
             conversation_id: ID of the conversation
@@ -54,16 +54,40 @@ class ContextRetriever:
         Returns:
             ChromaDB collection
         """
+        # Return cached collection if available
+        if conversation_id in self._collection_cache:
+            return self._collection_cache[conversation_id]
+
         collection_name = f"conversation_{conversation_id}"
         try:
             collection = self.client.get_or_create_collection(
                 name=collection_name,
                 metadata={"conversation_id": conversation_id}
             )
+            # Cache for future use
+            self._collection_cache[conversation_id] = collection
             return collection
         except Exception as e:
             logger.error(f"Failed to get/create collection: {e}")
             raise
+
+    def _add_to_collection(self, conversation_id: int, message_id: int, role: str, content: str, embedding: List[float]):
+        """Internal method to add message to collection.
+
+        Args:
+            conversation_id: ID of the conversation
+            message_id: ID of the message
+            role: Message role
+            content: Message content
+            embedding: Pre-computed embedding vector
+        """
+        collection = self.get_collection(conversation_id)
+        collection.add(
+            ids=[f"msg_{message_id}"],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[{"role": role, "message_id": message_id}]
+        )
 
     async def add_message_async(self, conversation_id: int, message_id: int, role: str, content: str) -> bool:
         """Add a message to the vector store asynchronously.
@@ -100,14 +124,7 @@ class ContextRetriever:
                 return needs_loading
 
             # Add to collection
-            collection = self.get_collection(conversation_id)
-            collection.add(
-                ids=[f"msg_{message_id}"],
-                embeddings=[embedding],
-                documents=[content],
-                metadatas=[{"role": role, "message_id": message_id}]
-            )
-            logger.debug(f"Added message {message_id} to vector store")
+            self._add_to_collection(conversation_id, message_id, role, content, embedding)
             return needs_loading
 
         except Exception as e:
@@ -134,14 +151,7 @@ class ContextRetriever:
                 return
 
             # Add to collection
-            collection = self.get_collection(conversation_id)
-            collection.add(
-                ids=[f"msg_{message_id}"],
-                embeddings=[embedding],
-                documents=[content],
-                metadatas=[{"role": role, "message_id": message_id}]
-            )
-            logger.debug(f"Added message {message_id} to vector store")
+            self._add_to_collection(conversation_id, message_id, role, content, embedding)
 
         except Exception as e:
             logger.error(f"Failed to add message to vector store: {e}")
@@ -225,6 +235,8 @@ class ContextRetriever:
         try:
             collection_name = f"conversation_{conversation_id}"
             self.client.delete_collection(name=collection_name)
+            # Remove from cache
+            self._collection_cache.pop(conversation_id, None)
             logger.info(f"Cleared vector store for conversation {conversation_id}")
         except Exception as e:
             logger.error(f"Failed to clear conversation: {e}")

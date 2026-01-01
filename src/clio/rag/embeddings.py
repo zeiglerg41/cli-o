@@ -89,7 +89,8 @@ class EmbeddingManager:
         try:
             _ = self.model
             return True
-        except:
+        except Exception as e:
+            logger.debug(f"RAG not available: {e}")
             return False
 
     def embed_text(self, text: str) -> Optional[List[float]]:
