@@ -12,21 +12,8 @@ class CommandAutoComplete(AutoComplete):
         super().__init__(target, candidates=None, **kwargs)
 
     def _get_all_commands(self) -> list[tuple[str, str]]:
-        """Get all available commands with descriptions."""
-        commands = [
-            ("/cleanup", "Delete old conversations"),
-            ("/clear", "Clear conversation history"),
-            ("/config", "Show configuration"),
-            ("/copy", "Copy last assistant response"),
-            ("/exit", "Exit the application"),
-            ("/export", "Export conversation to markdown"),
-            ("/help", "Show help message"),
-            ("/history", "Resume a previous conversation"),
-            ("/model", "List and switch models"),
-            ("/usage", "Show token usage and cost breakdown"),
-            ("/web", "Search the web"),
-        ]
-        return commands
+        """Get all available commands with descriptions from the router."""
+        return self.command_router.get_all_commands()
 
     def _find_slash_position(self, state: TargetState) -> int:
         """Find if input starts with /, or -1 if not."""

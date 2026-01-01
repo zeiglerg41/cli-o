@@ -526,7 +526,7 @@ class ChatApp(App):
             yield Label("", id="escape-hint", classes="hidden")
 
         # Custom autocomplete overlay
-        yield AutocompleteOverlay(Path(self.launch_dir), id="autocomplete-overlay")
+        yield AutocompleteOverlay(Path(self.launch_dir), command_router=self.command_router, id="autocomplete-overlay")
 
         yield Footer()
     
@@ -570,17 +570,18 @@ class ChatApp(App):
 
     def _register_commands(self) -> None:
         """Register slash commands."""
-        self.command_router.register("/help", self._cmd_help)
-        self.command_router.register("/clear", self._cmd_clear)
-        self.command_router.register("/exit", self._cmd_exit)
-        self.command_router.register("/model", self._cmd_model)
-        self.command_router.register("/config", self._cmd_config)
-        self.command_router.register("/copy", self._cmd_copy)
-        self.command_router.register("/export", self._cmd_export)
-        self.command_router.register("/history", self._cmd_history)
-        self.command_router.register("/cleanup", self._cmd_cleanup)
-        self.command_router.register("/usage", self._cmd_usage)
-        # /web handled specially in on_input_submitted - no command handler needed
+        self.command_router.register("/help", self._cmd_help, "Show help message")
+        self.command_router.register("/clear", self._cmd_clear, "Clear conversation history")
+        self.command_router.register("/exit", self._cmd_exit, "Exit the application")
+        self.command_router.register("/model", self._cmd_model, "List and switch models")
+        self.command_router.register("/config", self._cmd_config, "Edit configuration file")
+        self.command_router.register("/prompt", self._cmd_prompt, "Edit system prompt")
+        self.command_router.register("/copy", self._cmd_copy, "Copy last assistant response")
+        self.command_router.register("/export", self._cmd_export, "Export conversation to markdown")
+        self.command_router.register("/history", self._cmd_history, "Resume a previous conversation")
+        self.command_router.register("/cleanup", self._cmd_cleanup, "Delete old conversations")
+        self.command_router.register("/usage", self._cmd_usage, "Show token usage and cost breakdown")
+        self.command_router.register("/web", lambda args: "", "Search the web")  # Handled specially in on_input_submitted
     
     def _cmd_help(self, args: str) -> str:
         """Show help."""
@@ -590,7 +591,8 @@ class ChatApp(App):
 - `/model` - Switch models (interactive selection)
 - `/clear` - Clear conversation history
 - `/exit` - Exit the application
-- `/config` - Show configuration
+- `/config` - Edit configuration file
+- `/prompt` - Edit system prompt
 - `/copy` - Copy last assistant response to clipboard
 - `/export [filename]` - Export conversation to markdown file
 - `/history` - Resume a previous conversation (interactive selection)
@@ -741,6 +743,80 @@ You can also use `@filename` syntax to reference files:
             return ""  # Return empty to skip normal display
         except Exception as e:
             return f"❌ Failed to open editor: {e}\n\nYou can manually edit: {config_path}"
+
+    def _cmd_prompt(self, args: str) -> str:
+        """Edit system prompt in temporary file."""
+        import subprocess
+        import os
+        import tempfile
+        import json
+
+        # Get editor from environment or use fallback
+        editor = os.environ.get('EDITOR') or os.environ.get('VISUAL') or 'nano'
+
+        # Load current config
+        config = self.config_manager.load()
+
+        # Get current system prompt (from config or default)
+        current_prompt = config.preferences.system_prompt or """You are a coding assistant that directly edits files using tools.
+
+@ MENTIONS: When user writes @filename or @path, strip the @ prefix before using in tool calls.
+Example: "@clio/" → list_directory("clio/")
+
+When user says "@file change X to Y", immediately:
+1. read_file("file")
+2. edit_file("file", "X", "Y")
+3. Respond: "Changed X to Y"
+
+RESPONSE RULES (CRITICAL):
+- Zero fluff. No greetings, pleasantries, or filler phrases like "Let me know" or "Feel free to ask"
+- Answer questions with minimum viable words. "Yes" not "Yes, I can do that"
+- State facts only. Never pad responses
+- Never explain unless explicitly asked "why" or "how"
+- Execute tool calls immediately without narration
+
+Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory"""
+
+        try:
+            # Create temporary file with current prompt
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
+                tmp.write(current_prompt)
+                tmp_path = tmp.name
+
+            # Suspend Textual, run editor, then resume
+            with self.suspend():
+                result = subprocess.run([editor, tmp_path])
+
+            # Read edited prompt
+            with open(tmp_path, 'r') as f:
+                new_prompt = f.read()
+
+            # Clean up temp file
+            os.unlink(tmp_path)
+
+            # Check if changes were made
+            if current_prompt == new_prompt:
+                result_msg = "No changes made to system prompt"
+                msg_style = "dim"
+            else:
+                # Update config with new prompt
+                config.preferences.system_prompt = new_prompt
+                self.config_manager.save(config)
+                result_msg = "✓ System prompt updated\n\nRestart clio for changes to take effect."
+                msg_style = "dim"
+
+            # Schedule the message display after suspend() completes
+            def display_result():
+                from rich.text import Text
+                chat_log = self.query_one("#chat-log", RichLog)
+                chat_log.write(Text(result_msg, style=msg_style))
+                chat_log.refresh()
+
+            # Use set_timer with tiny delay to run after UI settles
+            self.set_timer(0.01, display_result)
+            return ""  # Return empty to skip normal display
+        except Exception as e:
+            return f"❌ Failed to edit prompt: {e}"
 
     def _cmd_copy(self, args: str) -> str:
         """Copy last assistant response to clipboard."""

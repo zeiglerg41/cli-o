@@ -1,18 +1,25 @@
 """Command router for slash commands."""
+import asyncio
 import re
 from typing import Optional, Tuple, Dict, Any, Callable, Awaitable
 
 
 class CommandRouter:
     """Routes slash commands to handlers."""
-    
+
     def __init__(self):
         """Initialize command router."""
         self.commands: Dict[str, Callable] = {}
-    
-    def register(self, command: str, handler: Callable) -> None:
-        """Register a command handler."""
+        self.descriptions: Dict[str, str] = {}
+
+    def register(self, command: str, handler: Callable, description: str = "") -> None:
+        """Register a command handler with optional description."""
         self.commands[command] = handler
+        self.descriptions[command] = description
+
+    def get_all_commands(self) -> list[tuple[str, str]]:
+        """Get all registered commands with their descriptions."""
+        return [(cmd, self.descriptions.get(cmd, "")) for cmd in sorted(self.commands.keys())]
     
     def parse(self, user_input: str) -> Tuple[Optional[str], Optional[str], str]:
         """
@@ -60,6 +67,3 @@ class CommandRouter:
         mentions = [m[0] or m[1] for m in matches]
         
         return mentions
-
-
-import asyncio

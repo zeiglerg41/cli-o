@@ -34,22 +34,10 @@ class AutocompleteOverlay(Container):
     }
     """
 
-    def __init__(self, working_dir: Path, *args, **kwargs):
+    def __init__(self, working_dir: Path, command_router=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.working_dir = working_dir
-        self.commands = [
-            ('cleanup', 'Delete old conversations'),
-            ('clear', 'Clear conversation history'),
-            ('config', 'Show configuration'),
-            ('copy', 'Copy last assistant response'),
-            ('exit', 'Exit the application'),
-            ('export', 'Export conversation to markdown'),
-            ('help', 'Show help message'),
-            ('history', 'Resume a previous conversation'),
-            ('model', 'List and switch models'),
-            ('usage', 'Show token usage and cost breakdown'),
-            ('web', 'Search the web'),
-        ]
+        self.command_router = command_router
         self.current_trigger = None  # '/' or '@' or None
         self.trigger_pos = -1
         self.search_term = ""
@@ -127,13 +115,19 @@ class AutocompleteOverlay(Container):
         option_list.action_cursor_down()
 
     def _get_command_matches(self, search_term: str) -> list:
-        """Get matching commands."""
+        """Get matching commands from the command router."""
+        # Get commands from router, or fallback to empty list
+        if self.command_router:
+            all_commands = [(cmd.lstrip('/'), desc) for cmd, desc in self.command_router.get_all_commands()]
+        else:
+            all_commands = []
+
         if not search_term:
-            return self.commands
+            return all_commands
 
         search_lower = search_term.lower()
-        prefix = [cmd for cmd in self.commands if cmd[0].startswith(search_lower)]
-        contains = [cmd for cmd in self.commands if search_lower in cmd[0] and cmd not in prefix]
+        prefix = [cmd for cmd in all_commands if cmd[0].startswith(search_lower)]
+        contains = [cmd for cmd in all_commands if search_lower in cmd[0] and cmd not in prefix]
 
         return prefix + contains
 

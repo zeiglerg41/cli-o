@@ -147,7 +147,8 @@ class Agent:
             )
 
         # System prompt - Based on Qwen3 best practices: keep concise, single-purpose
-        self.system_prompt = """You are a coding assistant that directly edits files using tools.
+        # Load system prompt from config, or use default
+        default_system_prompt = """You are a coding assistant that directly edits files using tools.
 
 @ MENTIONS: When user writes @filename or @path, strip the @ prefix before using in tool calls.
 Example: "@clio/" → list_directory("clio/")
@@ -165,6 +166,12 @@ RESPONSE RULES (CRITICAL):
 - Execute tool calls immediately without narration
 
 Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory"""
+
+        # Use custom system prompt from config if provided
+        from ..config.manager import ConfigManager
+        config_manager = ConfigManager()
+        config = config_manager.load()
+        self.system_prompt = config.preferences.system_prompt or default_system_prompt
 
     def _reconstruct_messages(self, db_messages: List[Dict]) -> List[Message]:
         """Reconstruct messages from database format to API format.
