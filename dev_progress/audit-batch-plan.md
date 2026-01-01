@@ -74,13 +74,14 @@ src/clio/rag/embeddings.py    (~150 lines) - Sentence transformers model
 
 ---
 
-## 📍 GROUP 4: Provider Layer (376 lines)
+## 📍 GROUP 4: Provider Layer (1419 lines) ✅ BATCH 1 COMPLETE
 **Why fourth:** Abstraction layer. Less frequently changed. Smaller surface area.
 
 ```
 src/clio/providers/base.py              (109 lines) - Abstract base class
 src/clio/providers/openai_compatible.py (267 lines) - OpenAI/Ollama/OpenWebUI
-src/clio/providers/anthropic.py         (~150 lines) - Claude API
+src/clio/providers/anthropic.py         (~200 lines) - Claude API
+src/clio/providers/gemini.py            (~300 lines) - Google Gemini API
 src/clio/providers/capabilities.py      (~50 lines)  - Tool support detection
 src/clio/providers/schemas.py           (~50 lines)  - Shared types
 ```
@@ -90,6 +91,15 @@ src/clio/providers/schemas.py           (~50 lines)  - Shared types
 - Error handling patterns
 - Tool call parsing
 - Response format conversion
+
+**Changes implemented (Batch 1):**
+1. ✅ Removed production debug logging in openai_compatible.py (13 lines - **SECURITY FIX**)
+2. ✅ Removed duplicate json imports in openai_compatible.py and anthropic.py
+3. ✅ Extracted `_build_headers()` helper method in openai_compatible.py (~8 lines deduplication)
+
+**Total impact:** ~21 lines removed, fixed security issue (debug logs writing to /tmp), better code organization
+
+**Note:** gemini.py and other providers not yet audited - can continue if needed
 
 ---
 
@@ -145,7 +155,7 @@ src/clio/vscode_protocol.py         (~50 lines)  - VSCode protocol
 - [x] GROUP 1: UI Layer - **COMPLETE** (Phase 1: Quick wins done - removed ~97 lines, cached colors)
 - [x] GROUP 2: Agent Core + Tools - **COMPLETE** (found debug logs + datetime import issues)
 - [x] GROUP 3: Data Persistence - **COMPLETE** (removed ~30 lines, added caching, consolidated duplicate code)
-- [ ] GROUP 4: Provider Layer
+- [x] GROUP 4: Provider Layer - **BATCH 1 COMPLETE** (removed ~21 lines, fixed security issue, deduplication)
 - [ ] GROUP 5: Config & Context
 - [ ] GROUP 6: Entry Points
 - [ ] GROUP 7: Auxiliary (optional)
@@ -169,3 +179,20 @@ src/clio/vscode_protocol.py         (~50 lines)  - VSCode protocol
 - Largest files: app.py (1735), tools.py (740), database.py (570)
 - We're not rewriting - we're simplifying and optimizing
 - Measure before/after for each group
+
+---
+
+## 🎁 Bonus Features Implemented
+
+### Config Change Detection
+**File:** `src/clio/ui/app.py` - `_cmd_config()`
+
+**Feature:** `/config` command now detects if user made changes:
+- Shows "No changes made to config" (dim) if no edits
+- Shows "✓ Config file edited... Restart clio" (dim) if changes made
+
+**Technical challenge solved:** `self.suspend()` breaks Textual UI rendering
+- **Solution:** Use `self.set_timer(0.01, callback)` to delay message display until after UI settles
+- This allows external editor to run while maintaining proper message display afterward
+
+**Impact:** Better UX, users get immediate feedback on whether config was modified
