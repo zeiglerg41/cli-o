@@ -25,7 +25,32 @@ class Provider(ABC):
         tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """Send chat completion request."""
+        """Send chat completion request.
+
+        Returns:
+            Response in canonical OpenAI-compatible format:
+            {
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": str,
+                        "tool_calls": [...]  # Optional
+                    },
+                    "finish_reason": str
+                }],
+                "usage": {
+                    "prompt_tokens": int,
+                    "completion_tokens": int,
+                    "total_tokens": int
+                },
+                "id": str,  # Optional
+                "model": str  # Optional
+            }
+
+        Note: Providers with native formats MUST normalize to this structure.
+        See: dev_progress/all-providers-response-formats.md
+        """
         pass
 
     @abstractmethod

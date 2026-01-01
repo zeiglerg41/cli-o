@@ -39,15 +39,8 @@ class AnthropicProvider(Provider):
         - System messages are passed separately
         - Tool results are in user messages with content blocks
         """
-        # Extract system message if present (Anthropic uses separate parameter)
-        system_message = None
-        anthropic_messages = []
-
-        for msg in messages:
-            if msg["role"] == "system":
-                system_message = msg["content"]
-            else:
-                anthropic_messages.append(msg)
+        # Convert messages from OpenAI format to Anthropic format
+        system_message, anthropic_messages = self._convert_messages_to_anthropic(messages)
 
         # Build request params
         params = {
@@ -60,7 +53,8 @@ class AnthropicProvider(Provider):
             params["system"] = system_message
 
         if tools:
-            params["tools"] = tools
+            # Convert from OpenAI format to Anthropic format
+            params["tools"] = self._convert_tools_to_anthropic(tools)
 
         # Add other kwargs (temperature, etc.)
         for key in ["temperature", "top_p", "top_k"]:
@@ -69,26 +63,8 @@ class AnthropicProvider(Provider):
 
         response = await self.client.messages.create(**params)
 
-        # Convert to standard dict format
-        return {
-            "id": response.id,
-            "model": response.model,
-            "role": response.role,
-            "content": [
-                {
-                    "type": block.type,
-                    **({"text": block.text} if hasattr(block, "text") else {}),
-                    **({"id": block.id, "name": block.name, "input": block.input}
-                       if block.type == "tool_use" else {})
-                }
-                for block in response.content
-            ],
-            "stop_reason": response.stop_reason,
-            "usage": {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            }
-        }
+        # Normalize to canonical OpenAI-compatible format
+        return self._normalize_response(response)
 
     async def stream_chat(
         self,
@@ -101,15 +77,8 @@ class AnthropicProvider(Provider):
 
         Anthropic streaming returns events with different types.
         """
-        # Extract system message
-        system_message = None
-        anthropic_messages = []
-
-        for msg in messages:
-            if msg["role"] == "system":
-                system_message = msg["content"]
-            else:
-                anthropic_messages.append(msg)
+        # Convert messages from OpenAI format to Anthropic format
+        system_message, anthropic_messages = self._convert_messages_to_anthropic(messages)
 
         # Build request params
         params = {
@@ -123,7 +92,8 @@ class AnthropicProvider(Provider):
             params["system"] = system_message
 
         if tools:
-            params["tools"] = tools
+            # Convert from OpenAI format to Anthropic format
+            params["tools"] = self._convert_tools_to_anthropic(tools)
 
         for key in ["temperature", "top_p", "top_k"]:
             if key in kwargs:
@@ -136,6 +106,159 @@ class AnthropicProvider(Provider):
                     "type": event.type,
                     "data": event.model_dump() if hasattr(event, "model_dump") else {}
                 }
+
+    def _convert_messages_to_anthropic(self, messages: List[Message]) -> tuple[Optional[str], List[Dict[str, Any]]]:
+        """Convert OpenAI-format messages to Anthropic format.
+
+        Returns:
+            Tuple of (system_message, anthropic_messages)
+        """
+        import json
+
+        system_message = None
+        anthropic_messages = []
+
+        for msg in messages:
+            if msg["role"] == "system":
+                # Extract system message (passed separately in Anthropic)
+                system_message = msg["content"]
+
+            elif msg["role"] == "tool":
+                # Convert tool result: OpenAI uses role="tool", Anthropic uses role="user" with content blocks
+                anthropic_messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": msg.get("tool_call_id", ""),
+                            "content": msg.get("content", "")
+                        }
+                    ]
+                })
+
+            elif msg["role"] == "assistant" and msg.get("tool_calls"):
+                # Convert assistant message with tool_calls to content blocks
+                content_blocks = []
+
+                # Add text content if present
+                if msg.get("content"):
+                    content_blocks.append({
+                        "type": "text",
+                        "text": msg["content"]
+                    })
+
+                # Add tool_use blocks (convert from OpenAI format)
+                for tool_call in msg["tool_calls"]:
+                    # Parse arguments if it's a JSON string
+                    arguments = tool_call["function"]["arguments"]
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            arguments = {}
+
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tool_call["id"],
+                        "name": tool_call["function"]["name"],
+                        "input": arguments
+                    })
+
+                anthropic_messages.append({
+                    "role": "assistant",
+                    "content": content_blocks
+                })
+
+            else:
+                # Pass through other messages unchanged
+                anthropic_messages.append(msg)
+
+        return system_message, anthropic_messages
+
+    def _convert_tools_to_anthropic(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert tools from OpenAI format to Anthropic format.
+
+        OpenAI format:
+            [{"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}]
+
+        Anthropic format:
+            [{"name": "...", "description": "...", "input_schema": {...}}]
+        """
+        anthropic_tools = []
+        for tool in tools:
+            # Handle both OpenAI format and already-converted format
+            if "type" in tool and tool["type"] == "function":
+                # OpenAI format: {"type": "function", "function": {...}}
+                func = tool["function"]
+                anthropic_tools.append({
+                    "name": func["name"],
+                    "description": func.get("description", ""),
+                    "input_schema": func.get("parameters", {})
+                })
+            elif "name" in tool:
+                # Already in Anthropic format or ToolDefinition format
+                anthropic_tools.append({
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "input_schema": tool.get("parameters", tool.get("input_schema", {}))
+                })
+        return anthropic_tools
+
+    def _normalize_response(self, anthropic_response) -> Dict[str, Any]:
+        """Convert Anthropic response to canonical OpenAI format.
+
+        Anthropic format has direct content blocks, OpenAI has choices array.
+        This normalizes to OpenAI format for provider-agnostic agent code.
+        """
+        import json
+
+        # Extract text blocks
+        text_parts = [
+            block.text
+            for block in anthropic_response.content
+            if block.type == "text"
+        ]
+        content = "".join(text_parts)
+
+        # Extract tool calls
+        tool_calls = []
+        for block in anthropic_response.content:
+            if block.type == "tool_use":
+                tool_calls.append({
+                    "id": block.id,
+                    "type": "function",
+                    "function": {
+                        "name": block.name,
+                        "arguments": json.dumps(block.input)
+                    }
+                })
+
+        # Build message object
+        message = {
+            "role": "assistant",
+            "content": content
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        # Return canonical OpenAI format
+        return {
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": anthropic_response.stop_reason
+            }],
+            "usage": {
+                "prompt_tokens": anthropic_response.usage.input_tokens,
+                "completion_tokens": anthropic_response.usage.output_tokens,
+                "total_tokens": (
+                    anthropic_response.usage.input_tokens +
+                    anthropic_response.usage.output_tokens
+                )
+            },
+            "id": anthropic_response.id,
+            "model": anthropic_response.model
+        }
 
     async def list_models(self) -> List[str]:
         """List available models.

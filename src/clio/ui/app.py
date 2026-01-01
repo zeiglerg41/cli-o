@@ -19,7 +19,6 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
-from rich.console import Console
 from rich.align import Align
 
 from ..agent.core import Agent
@@ -55,13 +54,6 @@ class AutocompleteTextArea(TextArea):
 
     async def on_key(self, event: events.Key) -> None:
         """Intercept Tab/Enter when autocomplete is visible, and Enter for submit."""
-        # Debug ALL keys at widget level
-        import datetime
-        with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{timestamp}] WIDGET on_key: key='{event.key}'\n")
-            f.flush()
-
         # If autocomplete is visible and Tab/Enter pressed
         if self.autocomplete_visible and event.key in ("tab", "enter"):
             # Don't let TextArea handle it, send message to parent
@@ -124,8 +116,6 @@ try:
     HAS_AUTOCOMPLETE = True
 except ImportError:
     HAS_AUTOCOMPLETE = False
-
-from .thinking_indicator import ThinkingIndicator
 
 
 def relative_time(iso_timestamp: str) -> str:
@@ -225,6 +215,11 @@ class GenericSelectScreen(ModalScreen):
             yield OptionList(*options, id="select-list")
             yield Label(self.help_text, id="select-help")
 
+    def on_mount(self) -> None:
+        """Set focus to the option list when modal mounts."""
+        option_list = self.query_one("#select-list", OptionList)
+        option_list.focus()
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Handle option selection."""
         selected_index = int(event.option.id)
@@ -310,6 +305,11 @@ class HistorySelectScreen(ModalScreen[int]):
             yield OptionList(*options, id="history-list")
             yield Label("↑/↓ to navigate • Enter to select • Esc/q to cancel", id="history-help")
 
+    def on_mount(self) -> None:
+        """Set focus to the option list when modal mounts."""
+        option_list = self.query_one("#history-list", OptionList)
+        option_list.focus()
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Handle option selection."""
         conv_id = int(event.option.id)
@@ -380,21 +380,8 @@ class ChatApp(App):
         display: none;
     }
 
-    #tool-calls-panel {
-        height: auto;
-        width: 100%;
-        padding: 1 2;
-        border: solid $primary;
-        margin-bottom: 1;
-    }
-
-    #tool-calls-panel.hidden {
-        display: none;
-    }
-
     #input-container {
         height: auto;
-        min-height: 5;
         width: 100%;
         max-width: 100%;
         padding: 0;
@@ -402,6 +389,7 @@ class ChatApp(App):
     }
 
     #status-bar {
+        dock: top;
         height: 1;
         width: 100%;
         background: $primary;
@@ -478,7 +466,6 @@ class ChatApp(App):
         self.pending_permission: Optional[asyncio.Future] = None
         self.last_assistant_response: str = ""
         self.conversation_history: List[Dict[str, str]] = []
-        self.thinking_indicator: Optional[ThinkingIndicator] = None
 
         # Command history
         self.command_history: List[str] = []
@@ -492,15 +479,18 @@ class ChatApp(App):
         # Active query tracking for cancellation
         self.current_query_worker = None
 
-        # Tool call streaming - track accumulated tool calls for current response
-        self.current_tool_calls_text: str = ""
-        self.current_tool_calls_widget = None
+        # Thinking indicator tracking
+        self.thinking_timer = None
+        self.thinking_frame = 0
 
         # Display messages for responsive re-rendering on resize
         self.display_messages: List[tuple] = []  # (content, title, border_style)
 
         # For handling /history restart
         self.selected_conversation_id: Optional[int] = None
+
+        # Cache colors (never changes during runtime)
+        self._cached_colors = self._get_colors()
 
     def _get_colors(self) -> dict:
         """Get color map based on colorblind mode setting."""
@@ -518,14 +508,12 @@ class ChatApp(App):
         # Chat log with low min_width to allow dynamic resizing
         yield RichLog(id="chat-log", wrap=True, markup=True, min_width=10)
 
-        # Thinking indicator (hidden by default)
-        yield ThinkingIndicator(id="thinking-indicator", classes="hidden")
+        # Thinking indicator (hidden by default, shown during processing)
+        yield Static("", id="thinking-indicator", classes="hidden")
 
-        # Tool calls panel (hidden by default, shown during tool execution)
-        yield Static("", id="tool-calls-panel", classes="hidden")
-
-        # Input with soft wrapping
+        # Input container
         with Container(id="input-container"):
+            # Input with soft wrapping
             chat_input = AutocompleteTextArea(
                 id="chat-input",
                 language=None,  # No syntax highlighting for plain input
@@ -699,55 +687,14 @@ You can also use `@filename` syntax to reference files:
             provider_name, model, hostname = selection
             await self.agent.switch_model(provider_name, model)
 
-            colors = self._get_colors()
-            self._write_message(
-                f"✓ Switched to **{model}** @ {hostname}",
-                title=colors["system_title"],
-                border_style=colors["system_color"],
-                align="center"
-            )
+            # Write directly to chat log like tool executions
+            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log.write(f"[dim]✓ Switched to {model} @ {hostname}[/dim]")
 
             # Update status bar
             status_bar = self.query_one("#status-bar", Static)
             status_bar.update(self._get_status_text())
-    
-    def _cmd_files(self, args: str) -> str:
-        """List files in context."""
-        files = self.context_manager.list_files()
-        
-        if not files:
-            return "No files in context"
-        
-        tokens = self.context_manager.get_total_tokens()
-        lines = [f"**Files in Context** ({len(files)} files, {tokens:,} tokens):\n"]
-        
-        for file_path in files:
-            content = self.context_manager.get_file_content(file_path)
-            file_tokens = self.context_manager.count_tokens(content)
-            lines.append(f"  📄 {file_path} ({file_tokens:,} tokens)")
-        
-        return "\n".join(lines)
-    
-    async def _cmd_add(self, args: str) -> str:
-        """Add file/folder to context."""
-        if not args:
-            return "Usage: /add <path>"
-        
-        path = args.strip()
-        
-        # Check if it's a directory
-        if Path(path).is_dir():
-            return await self.context_manager.add_folder(path)
-        else:
-            return await self.context_manager.add_file(path)
-    
-    def _cmd_remove(self, args: str) -> str:
-        """Remove file from context."""
-        if not args:
-            return "Usage: /remove <path>"
-        
-        return self.context_manager.remove_file(args.strip())
-    
+
     def _cmd_config(self, args: str) -> str:
         """Open config file in editor."""
         import subprocess
@@ -849,8 +796,8 @@ You can also use `@filename` syntax to reference files:
         db.close()
 
         if not conversations:
-            colors = self._get_colors()
-            self._write_message("No conversation history found.", title=colors["system_title"], border_style=colors["system_color"], align="center")
+            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log.write("[dim]No conversation history found.[/dim]")
             return
 
         # Show modal screen for selection (now running in worker context)
@@ -874,7 +821,7 @@ You can also use `@filename` syntax to reference files:
         else:
             return "✓ No old conversations to delete"
 
-    def _cmd_usage(self, args: str) -> str:
+    async def _cmd_usage(self, args: str) -> str:
         """Show usage statistics and costs."""
         from datetime import datetime
 
@@ -893,10 +840,14 @@ You can also use `@filename` syntax to reference files:
         using_actual_costs = False
 
         if admin_api_key and current_provider_config.type == "openai":
-            # Fetch actual costs from OpenAI billing API
+            # Show thinking indicator in chat log while fetching billing data
+            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log.write("[dim]Fetching billing data...[/dim]")
+
+            # Fetch actual costs from OpenAI billing API (async, won't block UI)
             try:
                 from ..billing import fetch_openai_costs
-                actual_costs = fetch_openai_costs(admin_api_key)
+                actual_costs = await fetch_openai_costs(admin_api_key)
                 using_actual_costs = True
             except Exception as e:
                 # Fall back to estimated costs if API fails
@@ -1029,16 +980,8 @@ You can also use `@filename` syntax to reference files:
 
     def on_resize(self, event: events.Resize) -> None:
         """Handle terminal resize by re-rendering all messages."""
-        debug_log = "/tmp/clio_resize_debug.log"
         try:
             chat_log = self.query_one("#chat-log", RichLog)
-
-            with open(debug_log, "a") as f:
-                f.write(f"\n=== RESIZE EVENT ===\n")
-                f.write(f"Terminal size: {event.size}\n")
-                f.write(f"chat_log.size: {chat_log.size}\n")
-                f.write(f"chat_log.scrollable_content_region: {chat_log.scrollable_content_region}\n")
-                f.write(f"chat_log.scrollable_content_region.width: {chat_log.scrollable_content_region.width}\n")
 
             # Clear the line cache if it exists
             if hasattr(chat_log, '_line_cache'):
@@ -1063,15 +1006,9 @@ You can also use `@filename` syntax to reference files:
                 # Use expand and shrink for dynamic resizing
                 chat_log.write(self._create_panel(content, title=title, border_style=border_style, align=align), expand=True, shrink=True)
 
-            with open(debug_log, "a") as f:
-                f.write(f"After rewrite - chat_log.scrollable_content_region.width: {chat_log.scrollable_content_region.width}\n")
-                f.write(f"After rewrite - chat_log._widest_line_width: {chat_log._widest_line_width}\n")
-
             chat_log.refresh()
-        except Exception as e:
-            import traceback
-            with open(debug_log, "a") as f:
-                f.write(f"ERROR: {e}\n{traceback.format_exc()}\n")
+        except Exception:
+            pass  # Silently handle resize errors
 
     async def on_mount(self) -> None:
         """Handle mount."""
@@ -1088,7 +1025,7 @@ You can also use `@filename` syntax to reference files:
             db.close()
 
             if messages:
-                colors = self._get_colors()
+                colors = self._cached_colors
                 self._write_message(
                     f"[bold cyan]Resuming Conversation #{self.conversation_id}[/bold cyan]\n\n"
                     f"📝 Session log: [dim]{log_path}[/dim]\n\n"
@@ -1119,16 +1056,10 @@ You can also use `@filename` syntax to reference files:
                     # Add to conversation history for /export etc
                     self.conversation_history.append({"role": role, "content": content})
 
-                colors = self._get_colors()
-                self._write_message(
-                    "─── End of previous conversation ───",
-                    title=colors["system_title"],
-                    border_style=colors["system_color"],
-                    align="center"
-                )
+                chat_log.write("[dim]─── End of previous conversation ───[/dim]")
         else:
             # New conversation
-            colors = self._get_colors()
+            colors = self._cached_colors
             self._write_message(
                 "[bold cyan]CLIO[/bold cyan] - Command Line Interactive Operator\n\n"
                 "A self-hosted AI coding assistant.\n\n"
@@ -1147,12 +1078,6 @@ You can also use `@filename` syntax to reference files:
 
     async def on_autocomplete_text_area_submit_message(self, message: AutocompleteTextArea.SubmitMessage) -> None:
         """Handle Enter key to submit message."""
-        import datetime
-        with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{timestamp}] SUBMIT MESSAGE HANDLER CALLED!\n")
-            f.flush()
-
         chat_input = self.query_one("#chat-input", AutocompleteTextArea)
         user_input = chat_input.text.strip()
 
@@ -1175,18 +1100,15 @@ You can also use `@filename` syntax to reference files:
 
     async def on_autocomplete_text_area_autocomplete_key(self, message: AutocompleteTextArea.AutocompleteKey) -> None:
         """Handle Tab/Enter in autocomplete mode."""
-        self._debug_log(f"🔍 Got AutocompleteKey message: key={message.key}")
 
         chat_input = self.query_one("#chat-input", AutocompleteTextArea)
         autocomplete = self.query_one("#autocomplete-overlay", AutocompleteOverlay)
 
         # Save trigger before hiding (hide() sets it to None)
         trigger = autocomplete.current_trigger
-        self._debug_log(f"🔍 Saved trigger before hide: '{trigger}'")
 
         # Apply completion
         completion = autocomplete.get_selected_completion()
-        self._debug_log(f"🔍 Completion selected: {completion}")
 
         if completion:
             self._apply_completion(chat_input, autocomplete, completion)
@@ -1207,16 +1129,11 @@ You can also use `@filename` syntax to reference files:
         chat_input.autocomplete_visible = False
 
         # If Enter was pressed on a slash command, submit it immediately
-        self._debug_log(f"🔍 Checking auto-submit: key={message.key}, trigger={trigger}")
         if message.key == "enter" and trigger == "/":
-            self._debug_log(f"🔍 Enter pressed on slash command, auto-submitting")
             user_input = chat_input.text.strip()
-            self._debug_log(f"🔍 user_input for submit: '{user_input}'")
             if user_input:
                 chat_input.clear()
                 await self._process_message(user_input)
-            else:
-                self._debug_log(f"🔍 Empty input, not submitting")
 
     async def on_autocomplete_text_area_escape_key(self, message: AutocompleteTextArea.EscapeKey) -> None:
         """Handle Escape key press."""
@@ -1231,29 +1148,11 @@ You can also use `@filename` syntax to reference files:
             return
 
         # If a query is currently running, cancel it
-        with open("/tmp/clio_cancel_debug.log", "a") as f:
-            f.write(f"\n=== ESCAPE PRESSED ===\n")
-            f.write(f"current_query_worker = {self.current_query_worker}\n")
-            if self.current_query_worker:
-                f.write(f"worker.is_finished = {self.current_query_worker.is_finished}\n")
-                f.write(f"worker.state = {self.current_query_worker.state}\n")
-
         if self.current_query_worker and not self.current_query_worker.is_finished:
-            with open("/tmp/clio_cancel_debug.log", "a") as f:
-                f.write(f"ATTEMPTING TO CANCEL WORKER...\n")
-
             self.current_query_worker.cancel()
 
-            with open("/tmp/clio_cancel_debug.log", "a") as f:
-                f.write(f"Worker.cancel() called\n")
-
-            colors = self._get_colors()
-            self._write_message(
-                Markdown("⚠️ **Query cancelled by user**"),
-                title=colors["system_title"],
-                border_style=colors["system_color"],
-                align="center"
-            )
+            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log.write("[dim]⚠️ Query cancelled by user[/dim]")
             self._reset_escape_state()
             return
 
@@ -1330,14 +1229,6 @@ You can also use `@filename` syntax to reference files:
 
         return (None, -1, "")
 
-    def _debug_log(self, message: str):
-        """Log debug message to file."""
-        import datetime
-        with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{timestamp}] {message}\n")
-            f.flush()
-
     def _reset_escape_state(self):
         """Reset escape key state and hide hint."""
         self.escape_pressed_once = False
@@ -1356,23 +1247,19 @@ You can also use `@filename` syntax to reference files:
         cursor = chat_input.cursor_location
         cursor_row, cursor_col = cursor
 
-        self._debug_log(f"🔍 DEBUG _apply_completion: text='{text}', cursor=({cursor_row},{cursor_col})")
 
         lines = text.split('\n')
         if cursor_row >= len(lines):
-            self._debug_log(f"🔍 DEBUG: cursor_row {cursor_row} >= len(lines) {len(lines)}, returning")
             return
 
         current_line = lines[cursor_row]
         before_cursor = current_line[:cursor_col]
 
-        self._debug_log(f"🔍 DEBUG: current_line='{current_line}', before_cursor='{before_cursor}'")
 
         # Replace based on trigger type
         if autocomplete.current_trigger == '/':
             # Replace from / to cursor with /completion
             new_line = f"/{completion} " + current_line[cursor_col:]
-            self._debug_log(f"🔍 DEBUG: Command completion - new_line='{new_line}'")
             lines[cursor_row] = new_line
             chat_input.text = '\n'.join(lines)
             # Move cursor after completion
@@ -1381,34 +1268,31 @@ You can also use `@filename` syntax to reference files:
         elif autocomplete.current_trigger == '@':
             # Replace from @ to cursor with @completion + space
             last_at = before_cursor.rfind('@')
-            self._debug_log(f"🔍 DEBUG: File completion - last_at={last_at}")
             if last_at != -1:
                 new_line = current_line[:last_at] + f"@{completion} " + current_line[cursor_col:]
-                self._debug_log(f"🔍 DEBUG: File completion - new_line='{new_line}'")
                 lines[cursor_row] = new_line
                 chat_input.text = '\n'.join(lines)
                 # Move cursor after completion and space
                 chat_input.move_cursor((cursor_row, last_at + 1 + len(completion) + 1))
-            else:
-                self._debug_log(f"🔍 DEBUG: Could not find @ in before_cursor!")
 
     async def on_key(self, event: events.Key) -> None:
         """Handle key presses for submission, history, and autocomplete."""
         # Log EVERY key press first
-        self._debug_log(f"🔍 on_key called: key={event.key}")
+
+        # Don't handle keys when a modal screen is active
+        if len(self.screen_stack) > 1:
+            return
 
         chat_input = self.query_one("#chat-input", TextArea)
         autocomplete = self.query_one("#autocomplete-overlay", AutocompleteOverlay)
 
         # Only handle when input is focused
         if not chat_input.has_focus:
-            self._debug_log(f"🔍 Input not focused, ignoring")
             return
 
         # Check if autocomplete is visible
         autocomplete_visible = "visible" in autocomplete.classes
 
-        self._debug_log(f"🔍 DEBUG on_key: key={event.key}, autocomplete_visible={autocomplete_visible}")
 
         # Reset escape state on any non-escape key press
         if event.key != "escape" and self.escape_pressed_once:
@@ -1417,25 +1301,18 @@ You can also use `@filename` syntax to reference files:
         # Handle autocomplete navigation
         if autocomplete_visible:
             if event.key == "down":
-                self._debug_log(f"🔍 DEBUG: Down arrow in autocomplete")
                 autocomplete.navigate_down()
                 event.prevent_default()
                 return
             elif event.key == "up":
-                self._debug_log(f"🔍 DEBUG: Up arrow in autocomplete")
                 autocomplete.navigate_up()
                 event.prevent_default()
                 return
             elif event.key == "tab" or event.key == "enter":
-                self._debug_log(f"🔍 DEBUG: INSIDE tab/enter handler!!!")
                 # Apply completion and hide autocomplete
                 completion = autocomplete.get_selected_completion()
-                self._debug_log(f"🔍 DEBUG: Tab/Enter pressed, completion={completion}, trigger={autocomplete.current_trigger}")
                 if completion:
-                    self._debug_log(f"🔍 DEBUG: Applying completion '{completion}'")
                     self._apply_completion(chat_input, autocomplete, completion)
-                else:
-                    self._debug_log(f"🔍 DEBUG: No completion selected!")
                 autocomplete.hide()
 
                 # If Enter was pressed on a slash command completion, submit it
@@ -1450,12 +1327,9 @@ You can also use `@filename` syntax to reference files:
                 return
         # Submit on Enter (Shift+Enter handled by backslash above)
         if event.key == "enter":
-            self._debug_log(f"🔍 ENTER KEY PRESSED (not in autocomplete)")
             user_input = chat_input.text.strip()
-            self._debug_log(f"🔍 user_input = '{user_input}'")
 
             if not user_input:
-                self._debug_log(f"🔍 Empty input, returning")
                 return
 
             # Add to command history
@@ -1469,10 +1343,8 @@ You can also use `@filename` syntax to reference files:
             # Clear input
             chat_input.clear()
 
-            self._debug_log(f"🔍 About to call _process_message with: '{user_input}'")
             # Process the message
             await self._process_message(user_input)
-            self._debug_log(f"🔍 _process_message completed")
             event.prevent_default()
             event.stop()
             return
@@ -1507,9 +1379,8 @@ You can also use `@filename` syntax to reference files:
     async def _process_message(self, user_input: str) -> None:
         """Process and send a user message."""
         import asyncio
-        self._debug_log(f"🔍 _process_message called with: '{user_input}'")
 
-        colors = self._get_colors()
+        colors = self._cached_colors
 
         # Show user message
         self._write_message(user_input, title=colors["user_title"], border_style=colors["user_color"])
@@ -1519,7 +1390,6 @@ You can also use `@filename` syntax to reference files:
 
         # Parse command or message
         command, args, original = self.command_router.parse(user_input)
-        self._debug_log(f"🔍 Parsed: command='{command}', args='{args}', original='{original}'")
 
         # Special handling for /web - convert to normal message flow
         actual_message = user_input
@@ -1532,15 +1402,16 @@ You can also use `@filename` syntax to reference files:
         self.conversation_history.append({"role": "user", "content": actual_message})
 
         if command:
-            self._debug_log(f"🔍 Executing command: {command} with args: {args}")
             # Execute command
             result = await self.command_router.execute(command, args)
-            self._debug_log(f"🔍 Command result: {result[:100] if result else '(empty)'}...")
 
             # Only display and store result if it's not empty
             # (Some commands like /model and /history handle their own display via workers)
             if result and result.strip():
-                self._write_message(Markdown(result), title=colors["system_title"], border_style=colors["system_color"], align="center")
+                chat_log = self.query_one("#chat-log", RichLog)
+                # Remove markdown formatting and display as simple dim text
+                clean_result = result.replace("**", "").replace("*", "")
+                chat_log.write(f"[dim]{clean_result}[/dim]")
                 # Add system message to history
                 self.conversation_history.append({"role": "system", "content": result})
         else:
@@ -1557,10 +1428,14 @@ You can also use `@filename` syntax to reference files:
             # No context injection - empty string
             context = ""
 
-            # Show thinking indicator
-            thinking_indicator = self.query_one("#thinking-indicator", ThinkingIndicator)
-            thinking_indicator.reset_tokens()
+            # Show thinking indicator with animation
+            thinking_indicator = self.query_one("#thinking-indicator", Static)
+            thinking_indicator.update("[dim]Thinking...[/dim]")
             thinking_indicator.remove_class("hidden")
+
+            # Start animation
+            self.thinking_frame = 0
+            self.thinking_timer = self.set_interval(0.15, self._animate_thinking)
 
             # Use Textual worker for cancellable background operation (don't await!)
             self.current_query_worker = self.run_worker(
@@ -1569,17 +1444,35 @@ You can also use `@filename` syntax to reference files:
                 name="chat_query"
             )
 
-            with open("/tmp/clio_cancel_debug.log", "a") as f:
-                f.write(f"\n=== WORKER CREATED (not awaited) ===\n")
-                f.write(f"worker = {self.current_query_worker}\n")
-                f.write(f"worker.state = {self.current_query_worker.state}\n")
-
             # Worker runs in background - result handled in on_worker_state_changed
 
         # Update status
         status_bar = self.query_one("#status-bar", Static)
         status_bar.update(self._get_status_text())
-    
+
+    def _animate_thinking(self) -> None:
+        """Animate the thinking indicator dots."""
+        frames = [
+            "Thinking.  ",
+            "Thinking.. ",
+            "Thinking...",
+            "Thinking ..",
+            "Thinking  .",
+            "Thinking   ",
+        ]
+
+        try:
+            thinking_indicator = self.query_one("#thinking-indicator", Static)
+            if "hidden" not in thinking_indicator.classes:
+                thinking_indicator.update(f"[dim]{frames[self.thinking_frame]}[/dim]")
+        except:
+            if self.thinking_timer:
+                self.thinking_timer.stop()
+                self.thinking_timer = None
+            return
+
+        self.thinking_frame = (self.thinking_frame + 1) % len(frames)
+
     async def request_permission(self, operation: str, details: str) -> bool:
         """Request permission from user."""
         # For now, auto-approve based on config
@@ -1601,38 +1494,19 @@ You can also use `@filename` syntax to reference files:
 
         from rich.markdown import Markdown as RichMarkdown
 
-        colors = self._get_colors()
-        thinking_indicator = self.query_one("#thinking-indicator", ThinkingIndicator)
+        colors = self._cached_colors
 
         if event.state == event.worker.state.SUCCESS:
             # Worker completed successfully
+            # Stop and hide thinking animation
+            if self.thinking_timer:
+                self.thinking_timer.stop()
+                self.thinking_timer = None
+            thinking_indicator = self.query_one("#thinking-indicator", Static)
+            thinking_indicator.add_class("hidden")
+
             response = event.worker.result
             chat_log = self.query_one("#chat-log", RichLog)
-
-            # Get usage stats and update thinking indicator
-            session_usage = self.agent.history_db.get_session_usage(self.agent.conversation_id)
-            if session_usage:
-                thinking_indicator.set_tokens(
-                    session_usage.get('prompt_tokens', 0),
-                    session_usage.get('completion_tokens', 0)
-                )
-
-            # Brief delay then hide thinking indicator
-            self.set_timer(0.5, lambda: thinking_indicator.add_class("hidden"))
-
-            # Finalize tool calls if any were executed
-            if self.current_tool_calls_text:
-                # Copy tool calls to chat log
-                self._write_message(
-                    RichMarkdown(self.current_tool_calls_text),
-                    title=colors["system_title"].replace("System", "Tools"),
-                    border_style=colors["system_color"],
-                    align="center"
-                )
-                # Hide and reset the tool calls panel
-                tool_panel = self.query_one("#tool-calls-panel", Static)
-                tool_panel.add_class("hidden")
-                self.current_tool_calls_text = ""
 
             # Write assistant response
             self._write_message(RichMarkdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
@@ -1646,26 +1520,24 @@ You can also use `@filename` syntax to reference files:
 
         elif event.state == event.worker.state.CANCELLED:
             # Worker was cancelled
+            # Stop and hide thinking animation
+            if self.thinking_timer:
+                self.thinking_timer.stop()
+                self.thinking_timer = None
+            thinking_indicator = self.query_one("#thinking-indicator", Static)
             thinking_indicator.add_class("hidden")
-
-            # Reset tool calls panel
-            if self.current_tool_calls_text:
-                tool_panel = self.query_one("#tool-calls-panel", Static)
-                tool_panel.add_class("hidden")
-                self.current_tool_calls_text = ""
 
             # Clear worker reference
             self.current_query_worker = None
 
         elif event.state == event.worker.state.ERROR:
             # Worker had an error
+            # Stop and hide thinking animation
+            if self.thinking_timer:
+                self.thinking_timer.stop()
+                self.thinking_timer = None
+            thinking_indicator = self.query_one("#thinking-indicator", Static)
             thinking_indicator.add_class("hidden")
-
-            # Reset tool calls panel
-            if self.current_tool_calls_text:
-                tool_panel = self.query_one("#tool-calls-panel", Static)
-                tool_panel.add_class("hidden")
-                self.current_tool_calls_text = ""
 
             # Show error
             error = event.worker.error
@@ -1680,45 +1552,35 @@ You can also use `@filename` syntax to reference files:
             self.current_query_worker = None
 
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
-        """Handle tool execution notification - streams to live panel."""
+        """Handle tool execution notification - display in chat log in real-time."""
         # Format tool call nicely
         if tool_name == "edit_file":
             path = arguments.get("path", "unknown")
             old_len = len(arguments.get("old_text", ""))
             new_len = len(arguments.get("new_text", ""))
-            tool_display = f"🔧 **edit_file**: {path} (replaced {old_len} chars with {new_len} chars)"
+            tool_display = f"🔧 {tool_name}: {path} (replaced {old_len} chars with {new_len} chars)"
         elif tool_name == "write_file":
             path = arguments.get("path", "unknown")
             content_len = len(arguments.get("content", ""))
-            tool_display = f"✍️  **write_file**: {path} ({content_len} chars)"
+            tool_display = f"✍️  {tool_name}: {path} ({content_len} chars)"
         elif tool_name == "read_file":
             path = arguments.get("path", "unknown")
-            tool_display = f"📖 **read_file**: {path}"
+            tool_display = f"📖 {tool_name}: {path}"
         elif tool_name == "execute_bash":
             command = arguments.get("command", "unknown")
-            tool_display = f"💻 **execute_bash**: `{command}`"
+            tool_display = f"💻 {tool_name}: {command}"
         elif tool_name == "list_directory":
             path = arguments.get("path", ".")
-            tool_display = f"📁 **list_directory**: {path}"
+            tool_display = f"📁 {tool_name}: {path}"
+        elif tool_name == "web_search":
+            query = arguments.get("query", "unknown")
+            tool_display = f"🔍 {tool_name}: {query}"
         else:
-            tool_display = f"🔧 **{tool_name}**: {arguments}"
+            tool_display = f"🔧 {tool_name}: {str(arguments)[:100]}"
 
-        # Get the tool calls panel
-        tool_panel = self.query_one("#tool-calls-panel", Static)
-
-        # If this is the first tool call, show the panel and initialize
-        if not self.current_tool_calls_text:
-            colors = self._get_colors()
-            # Set title with proper color
-            tool_panel.remove_class("hidden")
-            self.current_tool_calls_text = f"**Tools Executed:**\n\n{tool_display}"
-        else:
-            # Append to existing tool calls (double newline for Markdown line break)
-            self.current_tool_calls_text += f"\n\n{tool_display}"
-
-        # Update the panel with all accumulated tool calls using Markdown renderable
-        from rich.markdown import Markdown as RichMarkdown
-        tool_panel.update(RichMarkdown(self.current_tool_calls_text))
+        # Display tool execution in chat log
+        chat_log = self.query_one("#chat-log", RichLog)
+        chat_log.write(f"[dim]{tool_display}[/dim]")
 
     def action_clear(self) -> None:
         """Clear chat log."""
@@ -1728,8 +1590,3 @@ You can also use `@filename` syntax to reference files:
         self.agent.clear_history()
         self.conversation_history.clear()
         self.last_assistant_response = ""
-
-        # Reset tool calls panel
-        tool_panel = self.query_one("#tool-calls-panel", Static)
-        tool_panel.add_class("hidden")
-        self.current_tool_calls_text = ""

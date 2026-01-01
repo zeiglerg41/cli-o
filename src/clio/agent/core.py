@@ -31,6 +31,7 @@ class Agent:
 
     # Model pricing (input/output per 1M tokens)
     MODEL_PRICING = {
+        # OpenAI models (per 1M tokens)
         "gpt-5.2": {"input": 1.25, "output": 10.00},
         "gpt-5.1": {"input": 1.50, "output": 12.00},
         "gpt-5": {"input": 2.00, "output": 15.00},
@@ -45,6 +46,36 @@ class Agent:
         "o1-preview": {"input": 15.00, "output": 60.00},
         "o1-mini": {"input": 3.00, "output": 12.00},
         "o3-mini": {"input": 1.10, "output": 4.40},
+
+        # Anthropic Claude models (per 1M tokens)
+        # Claude 4.5 family (latest - Nov 2025)
+        "claude-opus-4-5": {"input": 5.00, "output": 25.00},
+        "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
+        "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+        # Claude 4.1 family (Aug 2025)
+        "claude-opus-4-1": {"input": 15.00, "output": 75.00},
+        # Claude 4 family
+        "claude-opus-4": {"input": 15.00, "output": 75.00},
+        "claude-sonnet-4": {"input": 3.00, "output": 15.00},
+        # Claude 3.7 family
+        "claude-3-7-sonnet": {"input": 3.00, "output": 15.00},
+        # Claude 3.5 family
+        "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
+        "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
+        # Claude 3 family (deprecated)
+        "claude-3-opus": {"input": 15.00, "output": 75.00},
+        "claude-3-sonnet": {"input": 3.00, "output": 15.00},
+        "claude-3-haiku": {"input": 0.25, "output": 1.25},
+
+        # Google Gemini models (per 1M tokens)
+        "gemini-2.0-flash": {"input": 0.00, "output": 0.00},  # Free tier
+        "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+        "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+
+        # DeepSeek models (per 1M tokens)
+        "deepseek-chat": {"input": 0.14, "output": 0.28},
+        "deepseek-reasoner": {"input": 0.55, "output": 2.19},
+        "deepseek-coder": {"input": 0.14, "output": 0.28},
     }
 
     def __init__(

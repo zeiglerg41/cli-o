@@ -41,6 +41,18 @@ TOOL_SUPPORT_MATRIX: Dict[str, Dict[str, bool]] = {
         "o4-mini": True,
     },
     "anthropic": {
+        # Claude 4.5 family (latest)
+        "claude-opus-4-5": True,
+        "claude-opus-4-5-20251101": True,
+        "claude-sonnet-4-5": True,
+        "claude-sonnet-4-5-20250929": True,
+        "claude-haiku-4-5": True,
+        "claude-haiku-4-5-20251001": True,
+
+        # Claude 3.7 family
+        "claude-3-7-sonnet": True,
+        "claude-3-7-sonnet-20250219": True,
+
         # Claude 3.5 family
         "claude-3-5-sonnet": True,
         "claude-3-5-sonnet-20241022": True,
@@ -65,6 +77,18 @@ TOOL_SUPPORT_MATRIX: Dict[str, Dict[str, bool]] = {
         "firefunction-v2": True,
         "command-r-plus": True,
         "command-r": True,
+    },
+    "gemini": {
+        # Gemini 2.0 family
+        "gemini-2.0-flash": True,
+        "gemini-2.0-flash-exp": True,
+        "gemini-2.0-flash-thinking-exp": True,
+
+        # Gemini 1.5 family
+        "gemini-1.5-pro": True,
+        "gemini-1.5-pro-exp": True,
+        "gemini-1.5-flash": True,
+        "gemini-1.5-flash-8b": True,
     }
 }
 

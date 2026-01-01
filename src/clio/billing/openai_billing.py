@@ -27,12 +27,12 @@ def _normalize_model_name(line_item: str) -> str:
     return base
 
 
-def fetch_openai_costs(
+async def fetch_openai_costs(
     admin_api_key: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None
 ) -> Dict[str, float]:
-    """Fetch actual costs from OpenAI's billing API.
+    """Fetch actual costs from OpenAI's billing API (async).
 
     Args:
         admin_api_key: Admin API key (sk-proj-... with admin permissions)
@@ -73,13 +73,13 @@ def fetch_openai_costs(
 
     costs_by_model = {}
 
-    with httpx.Client(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         # Handle pagination - keep fetching until has_more is False
         page_count = 0
         max_pages = 10  # Safety limit
 
         while page_count < max_pages:
-            response = client.get(url, headers=headers, params=params)
+            response = await client.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
 
@@ -123,12 +123,12 @@ def fetch_openai_costs(
     return costs_by_model
 
 
-def fetch_openai_usage(
+async def fetch_openai_usage(
     admin_api_key: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None
 ) -> List[Dict]:
-    """Fetch token usage from OpenAI's usage API.
+    """Fetch token usage from OpenAI's usage API (async).
 
     Args:
         admin_api_key: Admin API key
@@ -162,8 +162,8 @@ def fetch_openai_usage(
         "group_by": ["model"],
     }
 
-    with httpx.Client(timeout=30.0) as client:
-        response = client.get(url, headers=headers, params=params)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
 

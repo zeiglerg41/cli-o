@@ -107,38 +107,13 @@ class AutocompleteOverlay(Container):
         """Get the currently selected completion text."""
         option_list = self.query_one("#autocomplete-options", OptionList)
 
-        # Debug: Log state to file
-        import datetime
-        with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{timestamp}] DEBUG get_selected_completion: highlighted={option_list.highlighted}, option_count={option_list.option_count}\n")
-            f.flush()
-
         if option_list.highlighted is None:
-            with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-                timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{timestamp}] DEBUG: highlighted is None, returning None\n")
-                f.flush()
             return None
 
-        # Get the option data
         option = option_list.get_option_at_index(option_list.highlighted)
-        with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{timestamp}] DEBUG: option={option}, has id={hasattr(option, 'id') if option else False}, id={option.id if option and hasattr(option, 'id') else 'N/A'}\n")
-            f.flush()
-
         if option and hasattr(option, 'id') and option.id:
-            with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-                timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{timestamp}] DEBUG: Returning completion: '{option.id}'\n")
-                f.flush()
             return option.id
 
-        with open("/tmp/clio_autocomplete_debug.log", "a") as f:
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{timestamp}] DEBUG: No valid option, returning None\n")
-            f.flush()
         return None
 
     def navigate_up(self):
