@@ -33,7 +33,15 @@ class OpenAICompatibleProvider(Provider):
                 api_key=self.api_key,
                 default_headers=self.headers
             )
-    
+
+    def _build_headers(self) -> Dict[str, str]:
+        """Build HTTP headers for OpenWebUI requests."""
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            **self.headers
+        }
+
     async def chat(
         self,
         messages: List[Message],
@@ -54,36 +62,15 @@ class OpenAICompatibleProvider(Provider):
         # Use httpx for OpenWebUI, OpenAI SDK for others
         if self.is_openwebui:
             async with httpx.AsyncClient() as client:
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    **self.headers
-                }
                 try:
                     response = await client.post(
                         f"{self.base_url}/chat/completions",
                         json=params,
-                        headers=headers,
+                        headers=self._build_headers(),
                         timeout=300.0  # 5 minutes for larger models
                     )
                     response.raise_for_status()
                     result = response.json()
-
-                    # Debug log the response
-                    import sys
-                    debug_resp = f"""[DEBUG] API Response:
-- Status: {response.status_code}
-- Choices: {len(result.get('choices', []))}
-- Message content length: {len(result['choices'][0].get('message', {}).get('content', '') or '') if result.get('choices') else 0}
-- Message role: {result['choices'][0].get('message', {}).get('role') if result.get('choices') else 'none'}
-- Finish reason: {result['choices'][0].get('finish_reason') if result.get('choices') else 'none'}
-"""
-                    print(debug_resp, file=sys.stderr)
-
-                    with open("/tmp/clio_agent_debug.log", "a") as f:
-                        f.write(debug_resp + "\n")
-                        f.write(f"Full response: {str(result)[:500]}\n\n")
-
                     return result
                 except httpx.TimeoutException as e:
                     raise Exception(f"API request timed out after 300s: {str(e)}")
@@ -147,16 +134,11 @@ class OpenAICompatibleProvider(Provider):
         # Use httpx for OpenWebUI, OpenAI SDK for others
         if self.is_openwebui:
             async with httpx.AsyncClient() as client:
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    **self.headers
-                }
                 async with client.stream(
                     "POST",
                     f"{self.base_url}/chat/completions",
                     json=params,
-                    headers=headers,
+                    headers=self._build_headers(),
                     timeout=120.0
                 ) as response:
                     response.raise_for_status()
@@ -165,8 +147,7 @@ class OpenAICompatibleProvider(Provider):
                             data = line[6:]
                             if data == "[DONE]":
                                 break
-                            import json
-                            yield json.loads(data)
+                            yield json_module.loads(data)
         else:
             stream = await self.client.chat.completions.create(**params)
 

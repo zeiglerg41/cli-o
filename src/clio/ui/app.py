@@ -707,11 +707,38 @@ You can also use `@filename` syntax to reference files:
         config_path = str(self.config_manager.config_path)
 
         try:
+            # Read config before editing
+            with open(config_path, 'r') as f:
+                original_content = f.read()
+
             # Suspend Textual, run editor, then resume
             with self.suspend():
-                subprocess.run([editor, config_path])
+                result = subprocess.run([editor, config_path])
 
-            return f"✓ Config file edited: {config_path}\n\nRestart clio for changes to take effect."
+            # Read config after editing
+            with open(config_path, 'r') as f:
+                new_content = f.read()
+
+            # Check if changes were made
+            # Both paths need delayed display because of suspend()
+            if original_content == new_content:
+                result_msg = "No changes made to config"
+                msg_style = "dim"
+            else:
+                result_msg = f"✓ Config file edited: {config_path}\n\nRestart clio for changes to take effect."
+                msg_style = "dim"
+
+            # Schedule the message display after suspend() completes
+            def display_result():
+                from rich.text import Text
+                chat_log = self.query_one("#chat-log", RichLog)
+                chat_log.write(Text(result_msg, style=msg_style))
+                # Force refresh
+                chat_log.refresh()
+
+            # Use set_timer with tiny delay to run after UI settles
+            self.set_timer(0.01, display_result)
+            return ""  # Return empty to skip normal display
         except Exception as e:
             return f"❌ Failed to open editor: {e}\n\nYou can manually edit: {config_path}"
 
@@ -1408,10 +1435,12 @@ You can also use `@filename` syntax to reference files:
             # Only display and store result if it's not empty
             # (Some commands like /model and /history handle their own display via workers)
             if result and result.strip():
+                # Write result as a simple text message
+                from rich.text import Text
                 chat_log = self.query_one("#chat-log", RichLog)
-                # Remove markdown formatting and display as simple dim text
-                clean_result = result.replace("**", "").replace("*", "")
-                chat_log.write(f"[dim]{clean_result}[/dim]")
+                text_obj = Text(result, style="dim")
+                chat_log.write(text_obj)
+
                 # Add system message to history
                 self.conversation_history.append({"role": "system", "content": result})
         else:

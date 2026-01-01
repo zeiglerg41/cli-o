@@ -37,9 +37,9 @@ class CommandRouter:
         """Execute a command."""
         if command not in self.commands:
             return f"Unknown command: {command}. Type /help for available commands."
-        
+
         handler = self.commands[command]
-        
+
         # Call handler
         if asyncio.iscoroutinefunction(handler):
             return await handler(args)

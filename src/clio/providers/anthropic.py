@@ -1,5 +1,6 @@
 """Anthropic Claude provider."""
 from typing import AsyncIterator, Dict, Any, List, Optional
+import json
 
 from .base import Provider, Message
 from .schemas import ToolDefinition, ToolCall, ToolResult
@@ -113,8 +114,6 @@ class AnthropicProvider(Provider):
         Returns:
             Tuple of (system_message, anthropic_messages)
         """
-        import json
-
         system_message = None
         anthropic_messages = []
 
@@ -210,8 +209,6 @@ class AnthropicProvider(Provider):
         Anthropic format has direct content blocks, OpenAI has choices array.
         This normalizes to OpenAI format for provider-agnostic agent code.
         """
-        import json
-
         # Extract text blocks
         text_parts = [
             block.text
