@@ -8,9 +8,10 @@ from typing import Optional
 class IDEIntegration:
     """Integrate with IDE using CLI commands."""
 
-    def __init__(self, ide_type: str = "vscode"):
+    def __init__(self, ide_type: str = "vscode", timeout: int = 5):
         """Initialize IDE integration."""
         self.ide_type = ide_type
+        self.timeout = timeout
         self.cli_command = self._detect_cli_command()
 
     def _detect_cli_command(self) -> Optional[str]:
@@ -41,6 +42,9 @@ class IDEIntegration:
         if not self.cli_command:
             return False
 
+        old_path = None
+        new_path = None
+
         try:
             # Create temp files for diff
             with tempfile.NamedTemporaryFile(mode='w', suffix='.tmp', delete=False) as old_file:
@@ -55,18 +59,21 @@ class IDEIntegration:
             subprocess.run(
                 [self.cli_command, "--diff", old_path, new_path],
                 check=True,
-                timeout=5
+                timeout=self.timeout
             )
-
-            # Clean up temp files
-            Path(old_path).unlink(missing_ok=True)
-            Path(new_path).unlink(missing_ok=True)
 
             return True
 
         except Exception as e:
             print(f"Error showing diff: {e}")
             return False
+
+        finally:
+            # Always clean up temp files
+            if old_path:
+                Path(old_path).unlink(missing_ok=True)
+            if new_path:
+                Path(new_path).unlink(missing_ok=True)
 
     def open_file(self, file_path: str, line: Optional[int] = None) -> bool:
         """Open file in IDE at specific line."""
@@ -80,7 +87,7 @@ class IDEIntegration:
             else:
                 args.append(file_path)
 
-            subprocess.run(args, check=True, timeout=5)
+            subprocess.run(args, check=True, timeout=self.timeout)
             return True
 
         except Exception:
@@ -95,7 +102,7 @@ class IDEIntegration:
             subprocess.run(
                 [self.cli_command, "--command", command],
                 check=True,
-                timeout=5
+                timeout=self.timeout
             )
             return True
 

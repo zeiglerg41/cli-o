@@ -1,5 +1,4 @@
 """Context manager for @file and @folder mentions."""
-import asyncio
 import os
 from pathlib import Path
 from typing import Dict, Set, Optional
@@ -33,28 +32,32 @@ class ContextManager:
                         return [0] * (len(text) // 4)
                 self._encoding = FallbackEncoding()
         return self._encoding
-    
-    async def add_file(self, path: str) -> str:
-        """Add file to context."""
-        # Try multiple resolution strategies
+
+    def _resolve_path(self, path: str) -> Path:
+        """Resolve a path string to an absolute Path, trying multiple strategies."""
         file_path = Path(path)
 
-        # Strategy 1: Try as absolute path
+        # Try multiple resolution strategies
         if file_path.is_absolute() and file_path.exists():
-            file_path = file_path.resolve()
-        # Strategy 2: Try relative to stored working directory
+            return file_path.resolve()
         elif (self.working_dir / path).exists():
-            file_path = (self.working_dir / path).resolve()
-        # Strategy 3: Try relative to current working directory
+            return (self.working_dir / path).resolve()
         elif (Path.cwd() / path).exists():
-            file_path = (Path.cwd() / path).resolve()
-        # Strategy 4: Try as-is (might be relative to process cwd)
+            return (Path.cwd() / path).resolve()
         elif file_path.exists():
-            file_path = file_path.resolve()
+            return file_path.resolve()
         else:
+            # Path doesn't exist - return None to indicate failure
+            return None
+
+    async def add_file(self, path: str) -> str:
+        """Add file to context."""
+        file_path = self._resolve_path(path)
+
+        if file_path is None:
             # Give helpful error with all paths tried
-            return f"❌ File not found: {path}\nTried:\n  - {self.working_dir / path}\n  - {Path.cwd() / path}\n  - {file_path.absolute()}"
-        
+            return f"❌ File not found: {path}\nTried:\n  - {self.working_dir / path}\n  - {Path.cwd() / path}\n  - {Path(path).absolute()}"
+
         if not file_path.is_file():
             return f"❌ Not a file: {path}"
         
@@ -110,12 +113,13 @@ class ContextManager:
     
     def remove_file(self, path: str) -> str:
         """Remove file from context."""
-        file_path = str(Path(path).resolve())
-        
+        resolved = self._resolve_path(path)
+        file_path = str(resolved) if resolved else str(Path(path).resolve())
+
         if file_path in self.files:
             del self.files[file_path]
             return f"✓ Removed {path}"
-        
+
         return f"❌ File not in context: {path}"
     
     def list_files(self) -> list[str]:
@@ -124,7 +128,8 @@ class ContextManager:
     
     def get_file_content(self, path: str) -> Optional[str]:
         """Get file content."""
-        file_path = str(Path(path).resolve())
+        resolved = self._resolve_path(path)
+        file_path = str(resolved) if resolved else str(Path(path).resolve())
         return self.files.get(file_path)
     
     def count_tokens(self, text: str) -> int:

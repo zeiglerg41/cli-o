@@ -46,19 +46,24 @@ def relative_time(iso_timestamp: str) -> str:
 def main(ctx, show_history, do_cleanup, continue_flag):
     """Claude Clone - Self-hosted AI coding assistant."""
     from .history.database import HistoryDatabase
-    from datetime import datetime
+    from .config.manager import ConfigManager
+
+    # Load config for preferences
+    config_manager = ConfigManager()
+    config = config_manager.load()
+    max_recent = config.preferences.max_recent_conversations
 
     # Handle --history flag
     if show_history:
         db = HistoryDatabase()
-        conversations = db.get_recent_conversations(limit=20)
+        conversations = db.get_recent_conversations(limit=max_recent)
 
         if not conversations:
             click.echo("No conversation history found.")
             db.close()
             return
 
-        click.echo("\n📜 Recent Conversations (20 most recent):\n")
+        click.echo(f"\n📜 Recent Conversations ({max_recent} most recent):\n")
 
         for conv in conversations:
             conv_id = conv['id']
@@ -82,7 +87,7 @@ def main(ctx, show_history, do_cleanup, continue_flag):
     if do_cleanup:
         db = HistoryDatabase()
         click.echo("🧹 Cleaning up old conversations...")
-        deleted = db.cleanup_old_conversations(keep_recent=20)
+        deleted = db.cleanup_old_conversations(keep_recent=max_recent)
 
         if deleted:
             click.echo(f"✓ Deleted {deleted} old conversation(s)")
@@ -99,7 +104,7 @@ def main(ctx, show_history, do_cleanup, continue_flag):
         import shutil
 
         db = HistoryDatabase()
-        conversations = db.get_recent_conversations(limit=20)
+        conversations = db.get_recent_conversations(limit=max_recent)
         db.close()
 
         if not conversations:
@@ -238,11 +243,11 @@ def version():
 @click.option('--working-dir', default=None, help='Working directory')
 def vscode(working_dir):
     """Run in VSCode extension mode (JSON protocol via stdio)."""
-    import asyncio
+    from asyncio import run
     from .vscode_mode import run_vscode_mode
 
     working_dir = working_dir or _LAUNCH_CWD
-    asyncio.run(run_vscode_mode(working_dir))
+    run(run_vscode_mode(working_dir))
 
 
 if __name__ == "__main__":

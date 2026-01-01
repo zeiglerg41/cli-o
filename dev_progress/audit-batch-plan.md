@@ -103,7 +103,7 @@ src/clio/providers/schemas.py           (~50 lines)  - Shared types
 
 ---
 
-## 📍 GROUP 5: Config & Context (400 lines)
+## 📍 GROUP 5: Config & Context (400 lines) ✅ BATCH 1 COMPLETE
 **Why fifth:** Mostly initialization code. Called once or infrequently.
 
 ```
@@ -118,20 +118,38 @@ src/clio/commands/router.py   (~100 lines) - Slash command routing
 - File watching overhead
 - Context manager token counting
 
+**Changes implemented (Batch 1):**
+1. ✅ Removed unused asyncio import in context/manager.py (1 line cleanup)
+2. ✅ Extracted `_resolve_path()` helper method in context/manager.py (~15 lines deduplication)
+3. ✅ Added DRY principle to command registration - single source of truth in CommandRouter
+   - Commands now registered with descriptions in app.py
+   - Autocomplete pulls from router dynamically via `get_all_commands()`
+   - Removed hardcoded command list from autocomplete (~12 lines removed)
+
+**Total impact:** ~28 lines removed, better maintainability, added `/prompt` command for editing system prompt
+
 ---
 
-## 📍 GROUP 6: Entry Points (200 lines)
+## 📍 GROUP 6: Entry Points (200 lines) ✅ COMPLETE
 **Why sixth:** Thin orchestration layer. Usually fine.
 
 ```
-src/clio/cli.py       (~150 lines) - Argument parsing, app launch
-src/clio/__main__.py  (~20 lines)  - Entry point
+src/clio/cli.py       (~250 lines) - Argument parsing, app launch
+src/clio/__main__.py  (~6 lines)   - Entry point
 ```
 
 **Focus areas:**
 - Startup time
 - Import overhead
 - Unnecessary initialization
+
+**Changes implemented:**
+1. ✅ Removed duplicate datetime import in cli.py (already imported at top)
+2. ✅ Added `MAX_RECENT_CONVERSATIONS = 20` constant to eliminate magic numbers
+3. ✅ Replaced all hardcoded `20` and `limit=20` with constant (4 occurrences)
+4. ✅ Simplified asyncio import in vscode command (`from asyncio import run`)
+
+**Total impact:** Removed 1 duplicate import, eliminated 4 magic numbers, cleaner code
 
 ---
 
@@ -156,8 +174,8 @@ src/clio/vscode_protocol.py         (~50 lines)  - VSCode protocol
 - [x] GROUP 2: Agent Core + Tools - **COMPLETE** (found debug logs + datetime import issues)
 - [x] GROUP 3: Data Persistence - **COMPLETE** (removed ~30 lines, added caching, consolidated duplicate code)
 - [x] GROUP 4: Provider Layer - **BATCH 1 COMPLETE** (removed ~21 lines, fixed security issue, deduplication)
-- [ ] GROUP 5: Config & Context
-- [ ] GROUP 6: Entry Points
+- [x] GROUP 5: Config & Context - **BATCH 1 COMPLETE** (removed ~28 lines, DRY principles, added /prompt command)
+- [x] GROUP 6: Entry Points - **COMPLETE** (removed duplicate import, eliminated magic numbers)
 - [ ] GROUP 7: Auxiliary (optional)
 
 ---
