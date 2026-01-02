@@ -6,7 +6,7 @@ import { StatusBar } from './statusBar';
 import { ChatPanel } from './webview/chatPanel';
 import { BridgeServer } from './bridgeServer';
 import { DiffDecorator } from './diffDecorator';
-import { DiffCodeLensProvider } from './diffCodeLens';
+import { DiffCodeLensProvider } from './diffCodeLensProvider';
 
 /**
  * Extension activation entry point
@@ -19,12 +19,6 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Start WebSocket bridge server for terminal CLI
   const bridgeServer = new BridgeServer(diffDecorator);
-  bridgeServer.start().then(() => {
-    console.log('[Clio] Bridge server started');
-  }).catch((error) => {
-    console.error('[Clio] Failed to start bridge server:', error);
-    vscode.window.showErrorMessage(`Clio: Failed to start IDE bridge: ${error}`);
-  });
 
   // Register CodeLens provider for accept/reject buttons
   const codeLensProvider = new DiffCodeLensProvider(diffDecorator);
@@ -32,6 +26,17 @@ export function activate(context: vscode.ExtensionContext) {
     { scheme: 'file' },
     codeLensProvider
   );
+
+  // Connect bridge server to CodeLens provider
+  bridgeServer.setCodeLensProvider(codeLensProvider);
+
+  // Start the bridge server
+  bridgeServer.start().then(() => {
+    console.log('[Clio] Bridge server started');
+  }).catch((error) => {
+    console.error('[Clio] Failed to start bridge server:', error);
+    vscode.window.showErrorMessage(`Clio: Failed to start IDE bridge: ${error}`);
+  });
 
   // Register accept command
   const acceptDiffCommand = vscode.commands.registerCommand(

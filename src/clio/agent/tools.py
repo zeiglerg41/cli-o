@@ -22,12 +22,42 @@ class Tools:
         self.vscode_protocol = vscode_protocol
         # Track pending edits for batching highlights
         self.pending_highlights = {}  # file_path -> list of edit ranges
+        # Batching state
+        self.in_batch = False
+        self.batch_edits = {}  # file_path -> list of edits to send at end of batch
     
     async def request_permission(self, operation: str, details: str, diff_info: dict = None) -> bool:
         """Request permission for an operation."""
         if self.permission_callback:
             return await self.permission_callback(operation, details, diff_info)
         return True  # Auto-approve if no callback
+
+    def begin_batch(self) -> None:
+        """Start batching edit operations."""
+        self.in_batch = True
+        self.batch_edits.clear()
+
+    async def end_batch(self) -> None:
+        """End batching and send all accumulated edits."""
+        self.in_batch = False
+
+        # Send all batched edits per file
+        bridge = get_bridge()
+        if bridge.is_connected():
+            for file_path, edits in self.batch_edits.items():
+                if edits:
+                    # Clear old decorations first
+                    await bridge.clear_diff(file_path)
+
+                    # Send all edits for this file
+                    await bridge.propose_diff(
+                        file_path=file_path,
+                        edits=edits,
+                        description=f"Edit {Path(file_path).name}"
+                    )
+
+        # Clear batch state
+        self.batch_edits.clear()
 
     def clear_highlights(self, file_path: str = None) -> None:
         """Clear pending highlights for a file (or all files if None)."""
@@ -178,7 +208,7 @@ class Tools:
                     end_char_new = char_in_line + len(new_text)
                     end_line = lines_before
 
-                # Add this edit to pending highlights
+                # Create edit object
                 current_edit = {
                     "range": {
                         "start": {"line": lines_before, "character": max(0, char_in_line)},
@@ -188,21 +218,30 @@ class Tools:
                     "newText": new_text
                 }
 
-                # CRITICAL: Clear old pending highlights for this file before adding new one
-                # This prevents accumulating edits from previous operations
-                self.pending_highlights[file_path_str] = []
-                self.pending_highlights[file_path_str].append(current_edit)
+                # Handle batching vs immediate send
+                if self.in_batch:
+                    # Accumulate edit for batch send
+                    if file_path_str not in self.batch_edits:
+                        self.batch_edits[file_path_str] = []
+                    self.batch_edits[file_path_str].append(current_edit)
+                    return f"Successfully edited {path} (batched)"
+                else:
+                    # Immediate send (old behavior for single edits)
+                    # CRITICAL: Clear old pending highlights for this file before adding new one
+                    # This prevents accumulating edits from previous operations
+                    self.pending_highlights[file_path_str] = []
+                    self.pending_highlights[file_path_str].append(current_edit)
 
-                # Clear old decorations in VSCode before proposing new diff
-                await bridge.clear_diff(file_path_str)
+                    # Clear old decorations in VSCode before proposing new diff
+                    await bridge.clear_diff(file_path_str)
 
-                # Send proposeDiff with this single edit
-                await bridge.propose_diff(
-                    file_path=file_path_str,
-                    edits=self.pending_highlights[file_path_str],
-                    description=f"Edit {Path(path).name}"
-                )
-                return f"Successfully edited {path} (hover over green highlight to see changes, click Undo to revert)"
+                    # Send proposeDiff with this single edit
+                    await bridge.propose_diff(
+                        file_path=file_path_str,
+                        edits=self.pending_highlights[file_path_str],
+                        description=f"Edit {Path(path).name}"
+                    )
+                    return f"Successfully edited {path} (hover over green highlight to see changes, click Undo to revert)"
 
             # Normal mode: write file
             new_content = content.replace(old_text, new_text, 1)

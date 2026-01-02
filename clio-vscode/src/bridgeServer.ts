@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { DiffDecorator } from './diffDecorator';
+import { DiffCodeLensProvider } from './diffCodeLensProvider';
 
 /**
  * WebSocket bridge server for terminal CLI to connect to
@@ -14,11 +15,19 @@ export class BridgeServer {
   private port: number = 0;
   private lockFilePath: string;
   private diffDecorator: DiffDecorator;
+  private codeLensProvider: DiffCodeLensProvider | undefined;
 
   constructor(diffDecorator: DiffDecorator) {
     const clioDir = path.join(os.homedir(), '.clio', 'ide');
     this.lockFilePath = path.join(clioDir, 'bridge.json');
     this.diffDecorator = diffDecorator;
+  }
+
+  /**
+   * Set the CodeLens provider for refreshing after diffs
+   */
+  setCodeLensProvider(provider: DiffCodeLensProvider) {
+    this.codeLensProvider = provider;
   }
 
   /**
@@ -182,6 +191,11 @@ export class BridgeServer {
       fs.appendFileSync(debugLog, `  Calling diffDecorator.showDiff...\n`);
       await this.diffDecorator.showDiff(file, edits, description);
       fs.appendFileSync(debugLog, `  diffDecorator.showDiff completed\n`);
+
+      // Refresh CodeLens to show Keep/Undo buttons
+      if (this.codeLensProvider) {
+        this.codeLensProvider.refresh();
+      }
 
       // Note: We don't send a response here - waiting for user to accept/reject
       // The accept/reject commands will send diffAccepted or diffRejected

@@ -136,6 +136,21 @@ clio-vscode/
 - `npm run watch` - Watch mode for development
 - `npm run package` - Build production bundle
 
+### Developing with Installed Extension
+
+If the extension is already installed in Cursor/VS Code (e.g., at `~/.cursor/extensions/clio.clio-vscode-0.1.0/`), you need to copy the compiled files after making changes:
+
+```bash
+# After making changes to TypeScript files
+npm run compile
+cp dist/extension.js* ~/.cursor/extensions/clio.clio-vscode-0.1.0/dist/
+
+# Then reload the window in Cursor/VS Code
+# Command Palette → Developer: Reload Window
+```
+
+**Why?** Cursor/VS Code runs the extension from the installed location, not from your development directory. The compiled output in your project's `dist/` folder needs to be copied to the installed extension's `dist/` folder for changes to take effect.
+
 ### Testing
 
 1. Press `F5` to launch Extension Development Host

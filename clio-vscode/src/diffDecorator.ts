@@ -170,15 +170,44 @@ export class DiffDecorator {
         }
 
         // Remove this edit from the list
-        pending.edits.splice(editIndex, 1);
+        const removedEdit = pending.edits.splice(editIndex, 1)[0];
 
         // If no edits left, clear completely
         if (pending.edits.length === 0) {
             return await this.clearDiff(file);
         }
 
-        // Otherwise, re-render with remaining edits
-        await this.showDiff(file, pending.edits, pending.description);
+        // Re-apply decorations for remaining edits only
+        const uri = vscode.Uri.file(file);
+        const document = await vscode.workspace.openTextDocument(uri);
+        const editor = await vscode.window.showTextDocument(document);
+
+        const decorations: vscode.DecorationOptions[] = [];
+
+        // Build decorations for REMAINING edits only
+        for (const edit of pending.edits) {
+            const hoverMessage = new vscode.MarkdownString();
+            hoverMessage.appendMarkdown(`**Clio Edit:** ${pending.description}\n\n`);
+            hoverMessage.appendMarkdown(`**Previous text:**\n\`\`\`\n${edit.oldText}\n\`\`\`\n\n`);
+            hoverMessage.appendMarkdown(`**New text:**\n\`\`\`\n${edit.newText}\n\`\`\``);
+
+            for (let lineNum = edit.range.start.line; lineNum <= edit.range.end.line; lineNum++) {
+                const lineRange = new vscode.Range(
+                    new vscode.Position(lineNum, 0),
+                    new vscode.Position(lineNum, Number.MAX_SAFE_INTEGER)
+                );
+
+                decorations.push({
+                    range: lineRange,
+                    hoverMessage: hoverMessage,
+                });
+            }
+        }
+
+        // Apply decorations for remaining edits
+        editor.setDecorations(this.changedDecorationType, decorations);
+
+        console.log(`[DiffDecorator] Accepted edit ${editIndex}, ${pending.edits.length} remaining`);
         return true;
     }
 

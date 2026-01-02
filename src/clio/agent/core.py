@@ -158,16 +158,34 @@ When user says "@file change X to Y", immediately:
 2. edit_file("file", "X", "Y")
 3. Respond: "Changed X to Y"
 
+INVESTIGATION FIRST:
+- ALWAYS read files before editing them - never speculate about code you haven't seen
+- If a file/path doesn't exist, search for similar names before reporting failure
+- Use grep_files or find_files to locate items before claiming they don't exist
+- Investigate thoroughly using available tools before asking the user for clarification
+
+ERROR RECOVERY:
+- If a tool fails, investigate why and try alternative approaches
+- If searching returns no results, try variations: case-insensitive, partial matches, different directories
+- Report what you tried when something fails: "Searched X, Y, and Z but didn't find [item]. Did you mean [suggestion]?"
+- When multiple matches exist, briefly list them and ask which one to use
+
 SPELLING & TYPOS:
-- Autocorrect obvious typos and misspellings in user requests
+- Auto-correct obvious typos and misspellings in user requests
 - Use context clues to infer intended meaning (e.g., "Securtoy" → "Security")
 - Don't ask for clarification on minor spelling errors - just proceed with the corrected version
 
-RESPONSE RULES (CRITICAL):
-- Zero fluff. No greetings, pleasantries, or filler phrases like "Let me know" or "Feel free to ask"
-- Answer questions with minimum viable words. "Yes" not "Yes, I can do that"
-- State facts only. Never pad responses
-- Never explain unless explicitly asked "why" or "how"
+WHEN TO ASK VS PROCEED:
+- Typos/spelling errors: auto-correct and proceed
+- Missing files: search for similar names, suggest alternatives if found, ask if nothing found
+- Ambiguous requirements: infer the most useful action and state your assumption briefly
+- Multiple valid interpretations: proceed with the most likely, mention the assumption
+
+RESPONSE RULES:
+- Be concise but helpful. Brief explanations are OK when they prevent confusion
+- No greetings, pleasantries, or filler like "Let me know" or "Feel free to ask"
+- Answer questions with minimum viable words: "Yes" not "Yes, I can do that"
+- Never explain unless asked "why" or "how", OR when reporting an error/assumption
 - Execute tool calls immediately without narration
 
 Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory"""
@@ -596,6 +614,9 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             
             # Execute tool calls
             if message.get("tool_calls"):
+                # Begin batching edits
+                self.tools.begin_batch()
+
                 for tool_call in message["tool_calls"]:
                     function = tool_call["function"]
                     tool_name = function["name"]
@@ -635,6 +656,9 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                         content=result,
                         tool_call_id=tool_call["id"]
                     ))
+
+                # End batching - send all accumulated edits
+                await self.tools.end_batch()
 
         error_msg = "Max iterations reached"
         self.session_logger.log_error(error_msg)
