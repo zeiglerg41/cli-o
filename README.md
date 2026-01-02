@@ -226,6 +226,36 @@ Contributions are welcome! To set up a development environment:
     pytest
     ```
 
+### VS Code Extension Development
+
+The project includes a VS Code/Cursor extension for IDE integration with inline diff previews and CodeLens accept/reject buttons.
+
+**Location**: `clio-vscode/`
+
+**Setup**:
+```bash
+cd clio-vscode
+npm install
+npm run compile
+```
+
+**Development workflow** (when extension is already installed):
+
+If the extension is already installed at `~/.cursor/extensions/clio.clio-vscode-0.1.0/` or `~/.vscode/extensions/clio.clio-vscode-0.1.0/`, you need to copy compiled files after making changes:
+
+```bash
+# After making changes to TypeScript files
+npm run compile
+cp dist/extension.js* ~/.cursor/extensions/clio.clio-vscode-0.1.0/dist/
+
+# Then reload the window
+# Command Palette → Developer: Reload Window
+```
+
+**Why?** The IDE runs the extension from the installed location, not your development directory.
+
+**See `clio-vscode/README.md` for full documentation.**
+
 ---
 
 ## License
