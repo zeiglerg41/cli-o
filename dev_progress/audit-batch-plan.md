@@ -10,7 +10,7 @@
 
 ---
 
-## 📍 GROUP 1: UI Layer (1735 lines)
+## ð GROUP 1: UI Layer (1735 lines)
 **Why first:** We've been actively changing this. Fresh in memory. Highest LOC.
 
 ```
@@ -29,7 +29,7 @@ src/clio/ui/textarea_autocomplete.py (~150 lines) - Custom text input
 
 ---
 
-## 📍 GROUP 2: Agent Core + Tools (1253 lines)
+## ð GROUP 2: Agent Core + Tools (1253 lines)
 **Why second:** Heart of the app. Depends on providers/history. Called on every message.
 
 ```
@@ -47,7 +47,7 @@ src/clio/agent/session_logger.py (~100) - Per-session logging
 
 ---
 
-## 📍 GROUP 3: Data Persistence (800 lines) ✅ COMPLETE
+## ð GROUP 3: Data Persistence (800 lines) â COMPLETE
 **Why third:** Called frequently. Database operations are often bottlenecks.
 
 ```
@@ -64,17 +64,17 @@ src/clio/rag/embeddings.py    (~150 lines) - Sentence transformers model
 - Excessive get_session_usage() calls
 
 **Changes implemented:**
-1. ✅ Fixed bare except in embeddings.py (better error logging)
-2. ✅ Removed debug logging in hot path (retriever.py - 2 lines)
-3. ✅ Extracted title generation helper method (database.py - removed ~16 lines duplication)
-4. ✅ Added collection caching per conversation_id (retriever.py - performance improvement)
-5. ✅ Consolidated add_message methods (retriever.py - removed ~14 lines duplication)
+1. â Fixed bare except in embeddings.py (better error logging)
+2. â Removed debug logging in hot path (retriever.py - 2 lines)
+3. â Extracted title generation helper method (database.py - removed ~16 lines duplication)
+4. â Added collection caching per conversation_id (retriever.py - performance improvement)
+5. â Consolidated add_message methods (retriever.py - removed ~14 lines duplication)
 
 **Total impact:** ~30 lines removed, improved caching, better maintainability
 
 ---
 
-## 📍 GROUP 4: Provider Layer (1419 lines) ✅ BATCH 1 COMPLETE
+## ð GROUP 4: Provider Layer (1419 lines) â BATCH 1 COMPLETE
 **Why fourth:** Abstraction layer. Less frequently changed. Smaller surface area.
 
 ```
@@ -93,9 +93,9 @@ src/clio/providers/schemas.py           (~50 lines)  - Shared types
 - Response format conversion
 
 **Changes implemented (Batch 1):**
-1. ✅ Removed production debug logging in openai_compatible.py (13 lines - **SECURITY FIX**)
-2. ✅ Removed duplicate json imports in openai_compatible.py and anthropic.py
-3. ✅ Extracted `_build_headers()` helper method in openai_compatible.py (~8 lines deduplication)
+1. â Removed production debug logging in openai_compatible.py (13 lines - **SECURITY FIX**)
+2. â Removed duplicate json imports in openai_compatible.py and anthropic.py
+3. â Extracted `_build_headers()` helper method in openai_compatible.py (~8 lines deduplication)
 
 **Total impact:** ~21 lines removed, fixed security issue (debug logs writing to /tmp), better code organization
 
@@ -103,7 +103,7 @@ src/clio/providers/schemas.py           (~50 lines)  - Shared types
 
 ---
 
-## 📍 GROUP 5: Config & Context (400 lines) ✅ BATCH 1 COMPLETE
+## ð GROUP 5: Config & Context (400 lines) â BATCH 1 COMPLETE
 **Why fifth:** Mostly initialization code. Called once or infrequently.
 
 ```
@@ -119,9 +119,9 @@ src/clio/commands/router.py   (~100 lines) - Slash command routing
 - Context manager token counting
 
 **Changes implemented (Batch 1):**
-1. ✅ Removed unused asyncio import in context/manager.py (1 line cleanup)
-2. ✅ Extracted `_resolve_path()` helper method in context/manager.py (~15 lines deduplication)
-3. ✅ Added DRY principle to command registration - single source of truth in CommandRouter
+1. â Removed unused asyncio import in context/manager.py (1 line cleanup)
+2. â Extracted `_resolve_path()` helper method in context/manager.py (~15 lines deduplication)
+3. â Added DRY principle to command registration - single source of truth in CommandRouter
    - Commands now registered with descriptions in app.py
    - Autocomplete pulls from router dynamically via `get_all_commands()`
    - Removed hardcoded command list from autocomplete (~12 lines removed)
@@ -130,7 +130,7 @@ src/clio/commands/router.py   (~100 lines) - Slash command routing
 
 ---
 
-## 📍 GROUP 6: Entry Points (200 lines) ✅ COMPLETE
+## ð GROUP 6: Entry Points (200 lines) â COMPLETE
 **Why sixth:** Thin orchestration layer. Usually fine.
 
 ```
@@ -144,16 +144,16 @@ src/clio/__main__.py  (~6 lines)   - Entry point
 - Unnecessary initialization
 
 **Changes implemented:**
-1. ✅ Removed duplicate datetime import in cli.py (already imported at top)
-2. ✅ Added `MAX_RECENT_CONVERSATIONS = 20` constant to eliminate magic numbers
-3. ✅ Replaced all hardcoded `20` and `limit=20` with constant (4 occurrences)
-4. ✅ Simplified asyncio import in vscode command (`from asyncio import run`)
+1. â Removed duplicate datetime import in cli.py (already imported at top)
+2. â Added `MAX_RECENT_CONVERSATIONS = 20` constant to eliminate magic numbers
+3. â Replaced all hardcoded `20` and `limit=20` with constant (4 occurrences)
+4. â Simplified asyncio import in vscode command (`from asyncio import run`)
 
 **Total impact:** Removed 1 duplicate import, eliminated 4 magic numbers, cleaner code
 
 ---
 
-## 📍 GROUP 7: Auxiliary (500 lines - OPTIONAL)
+## ð GROUP 7: Auxiliary (500 lines - OPTIONAL)
 **Why last:** Nice-to-have features. Not critical path.
 
 ```
@@ -168,7 +168,7 @@ src/clio/vscode_protocol.py         (~50 lines)  - VSCode protocol
 
 ---
 
-## 🎯 Current Status
+## ð¯ Current Status
 
 - [x] GROUP 1: UI Layer - **COMPLETE** (Phase 1: Quick wins done - removed ~97 lines, cached colors)
 - [x] GROUP 2: Agent Core + Tools - **COMPLETE** (found debug logs + datetime import issues)
@@ -176,12 +176,12 @@ src/clio/vscode_protocol.py         (~50 lines)  - VSCode protocol
 - [x] GROUP 4: Provider Layer - **BATCH 1 COMPLETE** (removed ~21 lines, fixed security issue, deduplication)
 - [x] GROUP 5: Config & Context - **BATCH 1 COMPLETE** (removed ~28 lines, DRY principles, added /prompt command)
 - [x] GROUP 6: Entry Points - **COMPLETE** (removed duplicate import, eliminated magic numbers)
-- [ ] GROUP 7: Auxiliary (optional)
+- [x] GROUP 7: Auxiliary (optional) - **COMPLETE**
+- [x] GROUP 8: Security - COMPLETE
 
 ---
 
 ## Audit Process Per Group
-
 1. **Read files together** (understand dependencies)
 2. **Flag issues** (refer to performance-audit-checklist.md)
 3. **Propose changes** (concise, Pythonic)
@@ -200,17 +200,22 @@ src/clio/vscode_protocol.py         (~50 lines)  - VSCode protocol
 
 ---
 
-## 🎁 Bonus Features Implemented
+## ð Bonus Features Implemented
 
 ### Config Change Detection
 **File:** `src/clio/ui/app.py` - `_cmd_config()`
 
 **Feature:** `/config` command now detects if user made changes:
 - Shows "No changes made to config" (dim) if no edits
-- Shows "✓ Config file edited... Restart clio" (dim) if changes made
+- Shows "â Config file edited... Restart clio" (dim) if changes made
 
 **Technical challenge solved:** `self.suspend()` breaks Textual UI rendering
 - **Solution:** Use `self.set_timer(0.01, callback)` to delay message display until after UI settles
 - This allows external editor to run while maintaining proper message display afterward
 
 **Impact:** Better UX, users get immediate feedback on whether config was modified
+
+---
+
+#### Summary of GROUP 8 changes (by Deon):
+The security audit identified and addressed several vulnerabilities and best practices. Sensitive debug logs were either removed or secured, and dependencies were updated to the latest secure versions. Token handling for third-party APIs was revised to limit exposure in logs and error messages. Permission checks and validation were added on critical file and tool operations, and exception handling in the provider layer was hardened to prevent information leaks. These changes improve overall resilience and ensure a higher standard of data confidentiality and integrity throughout the codebase.

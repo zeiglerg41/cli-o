@@ -131,6 +131,10 @@ export class BridgeServer {
         await this.handleApplyDiff(ws, message);
         break;
 
+      case 'clearDiff':
+        await this.handleClearDiff(ws, message);
+        break;
+
       case 'closeDiff':
         await this.handleCloseDiff(ws, message);
         break;
@@ -162,11 +166,22 @@ export class BridgeServer {
     try {
       const { file, edits, description } = message;
 
+      // Write to file for debugging
+      const fs = require('fs');
+      const debugLog = `/tmp/clio_vscode_debug.log`;
+      fs.appendFileSync(debugLog, `\n[${new Date().toISOString()}] handleProposeDiff called\n`);
+      fs.appendFileSync(debugLog, `  File: ${file}\n`);
+      fs.appendFileSync(debugLog, `  Edits: ${edits.length}\n`);
+      fs.appendFileSync(debugLog, `  Description: ${description}\n`);
+      fs.appendFileSync(debugLog, `  Edits JSON: ${JSON.stringify(edits, null, 2)}\n`);
+
       console.log(`[Clio Bridge] Proposing diff for ${file}:`, description);
       console.log(`[Clio Bridge] Received ${edits.length} edits:`, JSON.stringify(edits, null, 2));
 
       // Show inline diff decorations
+      fs.appendFileSync(debugLog, `  Calling diffDecorator.showDiff...\n`);
       await this.diffDecorator.showDiff(file, edits, description);
+      fs.appendFileSync(debugLog, `  diffDecorator.showDiff completed\n`);
 
       // Note: We don't send a response here - waiting for user to accept/reject
       // The accept/reject commands will send diffAccepted or diffRejected
@@ -256,6 +271,23 @@ export class BridgeServer {
     } catch (error) {
       console.error('[Clio Bridge] Error applying diff:', error);
       this.sendError(ws, `Failed to apply diff: ${error}`);
+    }
+  }
+
+  /**
+   * Handle clearDiff - clear diff decorations for a file
+   */
+  private async handleClearDiff(ws: WebSocket, message: any): Promise<void> {
+    try {
+      const { file } = message;
+      console.log('[Clio Bridge] Clearing diff for', file);
+
+      // Clear decorations for this file
+      await this.diffDecorator.clearDiff(file);
+
+    } catch (error) {
+      console.error('[Clio Bridge] Error clearing diff:', error);
+      this.sendError(ws, `Failed to clear diff: ${error}`);
     }
   }
 

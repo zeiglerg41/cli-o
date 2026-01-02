@@ -14,7 +14,7 @@ class Tools:
 
     def __init__(
         self,
-        permission_callback: Optional[Callable[[str, str], Awaitable[bool]]] = None,
+        permission_callback: Optional[Callable[[str, str, Optional[dict]], Awaitable[bool]]] = None,
         vscode_protocol: Optional[Any] = None
     ):
         """Initialize tools."""
@@ -23,10 +23,10 @@ class Tools:
         # Track pending edits for batching highlights
         self.pending_highlights = {}  # file_path -> list of edit ranges
     
-    async def request_permission(self, operation: str, details: str) -> bool:
+    async def request_permission(self, operation: str, details: str, diff_info: dict = None) -> bool:
         """Request permission for an operation."""
         if self.permission_callback:
-            return await self.permission_callback(operation, details)
+            return await self.permission_callback(operation, details, diff_info)
         return True  # Auto-approve if no callback
 
     def clear_highlights(self, file_path: str = None) -> None:
@@ -114,6 +114,14 @@ class Tools:
             if old_text not in content:
                 return f"Error: Text not found in file: {old_text[:100]}..."
 
+            # Request permission BEFORE making any changes (works for both IDE and normal mode)
+            operation = "edit_file"
+            details = f"Edit {path}: replace {len(old_text)} chars with {len(new_text)} chars"
+            diff_info = {"old": old_text, "new": new_text}
+
+            if not await self.request_permission(operation, details, diff_info):
+                return "Permission denied"
+
             # Find position of old_text for VSCode range
             start_pos = content.find(old_text)
             lines_before = content[:start_pos].count('\n')
@@ -180,11 +188,15 @@ class Tools:
                     "newText": new_text
                 }
 
-                if file_path_str not in self.pending_highlights:
-                    self.pending_highlights[file_path_str] = []
+                # CRITICAL: Clear old pending highlights for this file before adding new one
+                # This prevents accumulating edits from previous operations
+                self.pending_highlights[file_path_str] = []
                 self.pending_highlights[file_path_str].append(current_edit)
 
-                # Send proposeDiff with ALL accumulated edits for this file
+                # Clear old decorations in VSCode before proposing new diff
+                await bridge.clear_diff(file_path_str)
+
+                # Send proposeDiff with this single edit
                 await bridge.propose_diff(
                     file_path=file_path_str,
                     edits=self.pending_highlights[file_path_str],
@@ -194,13 +206,6 @@ class Tools:
 
             # Normal mode: write file
             new_content = content.replace(old_text, new_text, 1)
-
-            # Request permission
-            operation = "edit_file"
-            details = f"Edit {path}: replace {len(old_text)} chars with {len(new_text)} chars"
-
-            if not await self.request_permission(operation, details):
-                return "Permission denied"
 
             # Write back - but skip the unicode_escape decode since we already did it above
             file_path = Path(path).resolve()

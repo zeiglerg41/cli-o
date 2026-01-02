@@ -445,6 +445,9 @@ class ChatApp(App):
         self.launch_dir = launch_dir or os.getcwd()
         self.conversation_id = conversation_id
 
+        # Session-level auto-approve (doesn't persist to config)
+        self.auto_approve_session = False
+
         # Initialize components
         self.config_manager = ConfigManager()
         self.context_manager = ContextManager(working_dir=self.launch_dir)
@@ -1380,7 +1383,57 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
 
     async def on_key(self, event: events.Key) -> None:
         """Handle key presses for submission, history, and autocomplete."""
-        # Log EVERY key press first
+        # Handle permission prompt - check if dropdown is in permission mode
+        autocomplete = self.query_one("#autocomplete-overlay", AutocompleteOverlay)
+
+        # Debug logging
+        if self.pending_permission or autocomplete.current_trigger == "permission":
+            with open("/tmp/clio_key_debug.log", "a") as f:
+                f.write(f"Key pressed: {event.key}, pending={self.pending_permission is not None}, trigger={autocomplete.current_trigger}\n")
+
+        if self.pending_permission and not self.pending_permission.done() and autocomplete.current_trigger == "permission":
+            chat_log = self.query_one("#chat-log", RichLog)
+            from rich.text import Text
+
+            # Handle Escape - deny and close
+            if event.key == "escape":
+                chat_log.write(Text("✗ Denied (cancelled)", style="red"))
+                self.pending_permission.set_result(False)
+                event.prevent_default()
+                event.stop()
+                return
+
+            # Handle up/down navigation
+            if event.key == "down":
+                autocomplete.navigate_down()
+                event.prevent_default()
+                return
+            elif event.key == "up":
+                autocomplete.navigate_up()
+                event.prevent_default()
+                return
+            # Handle selection with Enter or Tab
+            elif event.key in ("enter", "tab"):
+                selection = autocomplete.get_selected_completion()
+
+                if selection == 'y':
+                    chat_log.write(Text("✓ Approved", style="green"))
+                    self.pending_permission.set_result(True)
+                elif selection == 'n':
+                    chat_log.write(Text("✗ Denied", style="red"))
+                    self.pending_permission.set_result(False)
+                elif selection == 'a':
+                    chat_log.write(Text("✓ Always approve (session)", style="green bold"))
+                    self.auto_approve_session = True
+                    self.pending_permission.set_result(True)
+                else:
+                    # No valid selection - deny by default
+                    chat_log.write(Text("✗ Denied (no selection)", style="red"))
+                    self.pending_permission.set_result(False)
+
+                event.prevent_default()
+                event.stop()
+                return
 
         # Don't handle keys when a modal screen is active
         if len(self.screen_stack) > 1:
@@ -1578,18 +1631,84 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
 
         self.thinking_frame = (self.thinking_frame + 1) % len(frames)
 
-    async def request_permission(self, operation: str, details: str) -> bool:
-        """Request permission from user."""
-        # For now, auto-approve based on config
+    async def request_permission(self, operation: str, details: str, diff_info: dict = None) -> bool:
+        """Request permission from user for destructive operations.
+
+        Args:
+            operation: Operation type (edit_file, write_file, execute_bash)
+            details: Human-readable description
+            diff_info: Optional dict with 'old' and 'new' text for showing diff
+        """
         config = self.config_manager.load()
 
-        if config.preferences.auto_approve:
+        # Check config auto-approve or session auto-approve
+        if config.preferences.auto_approve or self.auto_approve_session:
             return True
 
-        # TODO: Implement interactive permission prompt
-        # For now, batch with tool calls
-        # Don't show permission requests - they're redundant with tool execution messages
-        return True
+        # Show permission prompt
+        from rich.text import Text
+        chat_log = self.query_one("#chat-log", RichLog)
+
+        # Build prompt message
+        prompt_text = Text()
+        prompt_text.append("⚠️  ", style="bold yellow")
+        prompt_text.append(f"{operation}: ", style="bold")
+        prompt_text.append(details, style="dim")
+        prompt_text.append("\n\n")
+
+        # Show diff if available
+        if diff_info and 'old' in diff_info and 'new' in diff_info:
+            old_lines = diff_info['old'].splitlines()
+            new_lines = diff_info['new'].splitlines()
+
+            # Show first few lines of diff
+            max_lines = 10
+            for line in old_lines[:max_lines]:
+                prompt_text.append("- ", style="red")
+                prompt_text.append(line + "\n", style="red dim")
+
+            for line in new_lines[:max_lines]:
+                prompt_text.append("+ ", style="green")
+                prompt_text.append(line + "\n", style="green dim")
+
+            if len(old_lines) > max_lines or len(new_lines) > max_lines:
+                prompt_text.append("\n... (diff truncated)\n\n", style="dim")
+            else:
+                prompt_text.append("\n")
+
+        chat_log.write(prompt_text)
+        chat_log.refresh()
+
+        # Show permission dropdown
+        autocomplete = self.query_one("#autocomplete-overlay", AutocompleteOverlay)
+        autocomplete.show_permission_options()
+
+        # Move focus to the dropdown's OptionList so user can use arrow keys and Enter
+        option_list = self.query_one("#autocomplete-options", OptionList)
+        option_list.focus()
+
+        # Create Future and wait for user response
+        import asyncio
+        self.pending_permission = asyncio.Future()
+
+        # Wait for user to select from dropdown (with 60 second timeout)
+        try:
+            result = await asyncio.wait_for(self.pending_permission, timeout=60.0)
+            return result
+        except asyncio.TimeoutError:
+            # User didn't respond in time - default to deny
+            chat_log.write(Text("✗ Permission timeout (denied by default)", style="red"))
+            return False
+        except asyncio.CancelledError:
+            # User cancelled (closed app, etc) - default to deny
+            chat_log.write(Text("✗ Permission cancelled (denied by default)", style="red"))
+            return False
+        finally:
+            self.pending_permission = None
+            autocomplete.hide()
+            # Return focus to input field
+            chat_input = self.query_one("#chat-input", TextArea)
+            chat_input.focus()
 
     def on_worker_state_changed(self, event) -> None:
         """Handle worker state changes - process query results."""

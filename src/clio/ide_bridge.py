@@ -114,10 +114,23 @@ class IDEBridge:
 
         return False
 
+    async def clear_diff(self, file_path: str) -> None:
+        """Clear diff decorations for a file."""
+        if not self.connected:
+            return
+
+        await self.send({
+            "type": "clearDiff",
+            "file": str(Path(file_path).resolve())
+        })
+
     async def propose_diff(self, file_path: str, edits: list, description: str = "") -> bool:
         """Propose diff with inline decorations and accept/reject buttons."""
         if not self.connected:
             return False
+
+        # Clear previous decorations for this file first
+        await self.clear_diff(file_path)
 
         await self.send({
             "type": "proposeDiff",

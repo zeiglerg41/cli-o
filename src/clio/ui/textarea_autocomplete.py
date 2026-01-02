@@ -82,14 +82,41 @@ class AutocompleteOverlay(Container):
         self.remove_class("hidden")
         self.add_class("visible")
 
-        # Use offset to scoot it up closer to the input
-        self.styles.offset = (0, -2)
+        # Position just below the input field
+        self.styles.offset = (0, -1)
 
     def hide(self):
         """Hide the overlay."""
         self.remove_class("visible")
         self.add_class("hidden")
         self.current_trigger = None
+
+    def show_permission_options(self):
+        """Show Y/N/A permission options."""
+        from textual.widgets.option_list import Option
+        from rich.text import Text
+
+        options = [
+            Option(Text("✓ Yes - Approve this operation", style="green"), id="y"),
+            Option(Text("✗ No - Deny this operation", style="red"), id="n"),
+            Option(Text("⚡ Always - Auto-approve for this session", style="cyan bold"), id="a"),
+        ]
+
+        option_list = self.query_one("#autocomplete-options", OptionList)
+        option_list.clear_options()
+        for opt in options:
+            option_list.add_option(opt)
+
+        # Highlight first option
+        option_list.highlighted = 0
+
+        # Show overlay
+        self.remove_class("hidden")
+        self.add_class("visible")
+        self.styles.offset = (0, -1)
+
+        # Mark as permission mode
+        self.current_trigger = "permission"
 
     def get_selected_completion(self) -> str | None:
         """Get the currently selected completion text."""

@@ -38,10 +38,20 @@ export class DiffDecorator {
      * Show highlight for changed lines with hover tooltip
      */
     async showDiff(file: string, edits: DiffEdit[], description: string): Promise<void> {
+        const fs = require('fs');
+        const debugLog = `/tmp/clio_vscode_debug.log`;
+
+        fs.appendFileSync(debugLog, `\n[${new Date().toISOString()}] DiffDecorator.showDiff called\n`);
+        fs.appendFileSync(debugLog, `  File: ${file}\n`);
+        fs.appendFileSync(debugLog, `  Edits count: ${edits.length}\n`);
+        fs.appendFileSync(debugLog, `  Description: ${description}\n`);
+
         const uri = vscode.Uri.file(file);
 
         // Force reload from disk to ensure we have the latest content
+        fs.appendFileSync(debugLog, `  Opening document...\n`);
         const document = await vscode.workspace.openTextDocument(uri);
+        fs.appendFileSync(debugLog, `  Document opened: ${document.uri.fsPath}\n`);
 
         // If document is dirty (has unsaved changes), we need to reload it
         // This ensures the file content matches what's on disk
@@ -80,7 +90,9 @@ export class DiffDecorator {
         }
 
         // Apply decorations
+        fs.appendFileSync(debugLog, `  Applying ${decorations.length} decorations to editor\n`);
         editor.setDecorations(this.changedDecorationType, decorations);
+        fs.appendFileSync(debugLog, `  Decorations applied successfully\n`);
 
         // Store pending diff for undo
         this.pendingDiffs.set(file, {

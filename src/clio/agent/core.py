@@ -81,7 +81,7 @@ class Agent:
     def __init__(
         self,
         config_manager: ConfigManager,
-        permission_callback: Optional[Callable[[str, str], Awaitable[bool]]] = None,
+        permission_callback: Optional[Callable[[str, str, Optional[dict]], Awaitable[bool]]] = None,
         tool_callback: Optional[Callable[[str, Dict[str, Any], str], Awaitable[None]]] = None,
         conversation_id: Optional[int] = None
     ):
@@ -158,6 +158,11 @@ When user says "@file change X to Y", immediately:
 2. edit_file("file", "X", "Y")
 3. Respond: "Changed X to Y"
 
+SPELLING & TYPOS:
+- Autocorrect obvious typos and misspellings in user requests
+- Use context clues to infer intended meaning (e.g., "Securtoy" → "Security")
+- Don't ask for clarification on minor spelling errors - just proceed with the corrected version
+
 RESPONSE RULES (CRITICAL):
 - Zero fluff. No greetings, pleasantries, or filler phrases like "Let me know" or "Feel free to ask"
 - Answer questions with minimum viable words. "Yes" not "Yes, I can do that"
@@ -217,9 +222,24 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             elif msg["role"] == "tool":
                 if msg.get("tool_call_id"):
                     # New format: tool_call_id is saved in database
+                    # But check if this tool_call_id is in our pending list
+                    # If not, it means the parent assistant message was truncated (outside 20-message window)
+                    if msg["tool_call_id"] not in pending_tool_call_ids:
+                        with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                            f.write(f"  {i}: SKIPPING tool message - parent assistant truncated\n")
+                        self.session_logger.logger.info(
+                            "Skipping tool message whose parent assistant was truncated"
+                        )
+                        continue
+
                     message["tool_call_id"] = msg["tool_call_id"]
                     with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-                        f.write(f"  {i}: Using saved tool_call_id\n")
+                        f.write(f"  {i}: Using saved tool_call_id: {msg['tool_call_id']}\n")
+
+                    # Remove this tool_call_id from pending list to mark it as fulfilled
+                    pending_tool_call_ids.remove(msg["tool_call_id"])
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  {i}: Removed from pending (remaining: {len(pending_tool_call_ids)})\n")
                 elif pending_tool_call_ids:
                     # Old format: reconstruct by matching with pending tool_call_ids
                     message["tool_call_id"] = pending_tool_call_ids.pop(0)
@@ -240,10 +260,88 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
 
             reconstructed.append(message)
 
-        with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-            f.write(f"\n=== FINAL: {len(reconstructed)} messages reconstructed ===\n")
+        # Final cleanup: If there are any pending tool_call_ids left (orphaned tool_calls with no responses),
+        # we need to remove the user message that triggered them, the assistant response, and any tool messages
+        # This prevents the agent from trying to re-execute cancelled requests when resuming a conversation
+        if pending_tool_call_ids:
+            with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                f.write(f"WARNING: {len(pending_tool_call_ids)} orphaned tool_call_ids remain - cleaning up\n")
+            self.session_logger.logger.warning(
+                f"Removing incomplete request with {len(pending_tool_call_ids)} orphaned tool_calls (likely from cancelled permission)"
+            )
+            # Find and remove the last assistant message with tool_calls
+            assistant_idx = None
+            for i in range(len(reconstructed) - 1, -1, -1):
+                if reconstructed[i].get("role") == "assistant" and reconstructed[i].get("tool_calls"):
+                    assistant_idx = i
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  Found orphaned assistant message at index {i}\n")
+                    break
 
-        return reconstructed
+            if assistant_idx is not None:
+                # Remove any tool messages that follow the assistant message
+                num_tool_calls = len(pending_tool_call_ids)
+                removed_tools = 0
+                i = assistant_idx + 1
+                while i < len(reconstructed) and removed_tools < num_tool_calls:
+                    if reconstructed[i].get("role") == "tool":
+                        with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                            f.write(f"  Removing orphaned tool message at index {i}\n")
+                        reconstructed.pop(i)
+                        removed_tools += 1
+                    else:
+                        # Stop when we hit a non-tool message
+                        break
+
+                # Remove the assistant message
+                with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                    f.write(f"  Removing assistant message at index {assistant_idx}\n")
+                reconstructed.pop(assistant_idx)
+
+                # Also remove the user message that preceded it (the cancelled request)
+                # This prevents the agent from trying to re-execute the request
+                if assistant_idx > 0 and reconstructed[assistant_idx - 1].get("role") == "user":
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  Removing cancelled user request at index {assistant_idx - 1}\n")
+                    reconstructed.pop(assistant_idx - 1)
+                    self.session_logger.logger.info("Removed cancelled request from conversation history")
+
+                pending_tool_call_ids.clear()
+
+        # Additional cleanup: Remove empty assistant messages and merge consecutive assistant messages
+        # This happens when permission is denied and we get assistant → tool → assistant → tool pattern
+        cleaned = []
+        for i, msg in enumerate(reconstructed):
+            # Skip empty assistant messages (no content and no tool_calls)
+            if msg["role"] == "assistant" and not msg.get("content") and not msg.get("tool_calls"):
+                with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                    f.write(f"  Skipping empty assistant message at index {i}\n")
+                continue
+
+            # Merge consecutive assistant messages
+            if cleaned and cleaned[-1]["role"] == "assistant" and msg["role"] == "assistant":
+                with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                    f.write(f"  Merging consecutive assistant messages at index {i}\n")
+                # Merge content
+                if msg.get("content"):
+                    if cleaned[-1].get("content"):
+                        cleaned[-1]["content"] += "\n\n" + msg["content"]
+                    else:
+                        cleaned[-1]["content"] = msg["content"]
+                # Merge tool_calls
+                if msg.get("tool_calls"):
+                    if cleaned[-1].get("tool_calls"):
+                        cleaned[-1]["tool_calls"].extend(msg["tool_calls"])
+                    else:
+                        cleaned[-1]["tool_calls"] = msg["tool_calls"]
+                continue
+
+            cleaned.append(msg)
+
+        with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+            f.write(f"\n=== FINAL: {len(cleaned)} messages reconstructed (from {len(reconstructed)} before cleanup) ===\n")
+
+        return cleaned
 
     async def switch_model(self, provider_name: str, model: str) -> None:
         """Switch to a different provider and model."""
