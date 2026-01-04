@@ -37,9 +37,22 @@ The application is designed with a modular architecture:
 
 ## Installation and Setup
 
-You can run Claude Clone either using Docker (recommended for a clean setup) or by installing it locally with Python.
+### Quick Install (PyPI)
 
-### Docker (Recommended)
+The easiest way to install Clio:
+
+```bash
+# Install with pipx (recommended - isolated environment)
+pipx install clio-ai
+
+# Or with pip
+pip install clio-ai
+
+# Run it
+clio
+```
+
+### Docker (Recommended for Development)
 
 This is the easiest way to get started. It ensures all dependencies are handled in an isolated environment.
 
@@ -133,61 +146,17 @@ The default configuration is set up to use a local Ollama instance. If you have 
 }
 ```
 
-To add a new provider (e.g., a remote OpenAI-compatible API), you can use the `add-provider` command or edit the JSON file directly.
+**Supported Providers:**
+- `openai` - OpenAI official API
+- `anthropic` - Anthropic Claude API
+- `gemini` - Google Gemini API
+- `deepseek` - DeepSeek official API
+- `grok` - xAI Grok API
+- `openai-compatible` - Any provider using OpenAI's API format:
+  - Self-hosted: Ollama, LM Studio, vLLM, text-generation-webui
+  - Third-party APIs: Groq, Together AI, Fireworks, Anyscale
 
-### Getting Actual Billing Data
-
-By default, the `/usage` command shows accurate token counts but **estimated costs** based on published pricing. To get **actual billing amounts** from your provider:
-
-#### For OpenAI
-
-1. **Get an Admin API Key**:
-   - Go to https://platform.openai.com/api-keys
-   - Create a new key with "Admin" permissions
-   - Copy the key (starts with `sk-proj-...`)
-
-2. **Add to your config** at `~/.clio/config.json`:
-   ```json
-   {
-     "providers": {
-       "openai": {
-         "type": "openai",
-         "baseURL": "https://api.openai.com/v1",
-         "apiKey": "sk-proj-YOUR-REGULAR-KEY-HERE",
-         "adminApiKey": "sk-proj-YOUR-ADMIN-KEY-HERE",
-         "models": ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
-       }
-     }
-   }
-   ```
-
-3. **Reload clio** - The `/usage` command will now fetch actual costs from OpenAI's billing API.
-
-#### For Anthropic (Claude)
-
-1. **Get an Admin API Key**:
-   - Go to https://console.anthropic.com/settings/keys
-   - Create a new key with Admin role
-   - Copy the key (starts with `sk-ant-admin-...`)
-
-2. **Add to your config**:
-   ```json
-   {
-     "providers": {
-       "anthropic": {
-         "type": "anthropic",
-         "baseURL": "https://api.anthropic.com/v1",
-         "apiKey": "sk-ant-YOUR-REGULAR-KEY",
-         "adminApiKey": "sk-ant-admin-YOUR-ADMIN-KEY",
-         "models": ["claude-3-opus", "claude-3-sonnet"]
-       }
-     }
-   }
-   ```
-
-3. **Reload clio** - The `/usage` command will now show actual billing data.
-
-**Note**: Admin API keys have elevated permissions. Store them securely and never commit them to version control.
+To add a new provider, use the `add-provider` command or edit the JSON file directly.
 
 ---
 
@@ -204,6 +173,85 @@ By default, the `/usage` command shows accurate token counts but **estimated cos
 | `/clear`          | Clears the current conversation history.          |
 | `/config`         | Displays the current configuration.               |
 | `/exit`           | Exits the application.                            |
+
+---
+
+## Architecture Decisions
+
+### Context Management: Hybrid Approach
+
+**Strategy**: Clio uses 4 complementary techniques to manage conversation context efficiently while maintaining relevance:
+
+**1. Sliding Window** (`core.py:500-535`)
+- Keep last 20 messages in active context (10 user/assistant pairs)
+- Token estimation with tiktoken (15k token limit)
+- Prevents unbounded context growth
+
+**2. RAG - Retrieval-Augmented Generation** (`rag/retriever.py`)
+- Semantic search retrieves 10 most relevant older messages (when conversation > 20 messages)
+- Uses `all-MiniLM-L6-v2` embeddings (384-dim) + ChromaDB vector store
+- Excludes last 20 messages (already in sliding window)
+- Maintains access to distant context beyond window
+
+**3. Observation Masking** (`core.py:537-566`)
+- Skip tool result messages already processed by LLM
+- Tracks `tool_call_id`s followed by assistant responses
+- Saves tokens on redundant tool outputs
+
+**4. In-Memory Trimming** (`core.py:730-738`)
+- Trim in-memory message list to last 20 after each iteration
+- Full history persisted to SQLite + ChromaDB (async)
+- Prevents memory bloat in long sessions
+
+**Flow**:
+```
+Load last 20 messages → RAG retrieve 10 relevant older messages (if needed)
+→ Apply observation masking → Token estimation → Send to LLM
+→ Trim in-memory to 20 → Save all to DB/vector store
+```
+
+This hybrid approach combines recency bias, semantic relevance, token efficiency, and memory efficiency—similar to patterns in LangChain and LlamaIndex.
+
+### Error Recovery: Orphaned Tool Calls
+
+**Problem**: When the agent detects repetitive loops and aborts execution, it leaves orphaned `tool_calls` in the conversation history without corresponding tool response messages. This violates the OpenAI API contract, causing 400 errors: "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'."
+
+**Solution**: Before returning loop detection errors, add dummy tool response messages for all pending `tool_call_id`s to maintain valid conversation state.
+
+**Implementation** (`src/clio/agent/core.py:771-780`):
+```python
+# Add dummy tool responses to satisfy API contract
+for tc in message["tool_calls"]:
+    dummy_tool_message = {
+        "role": "tool",
+        "tool_call_id": tc["id"],
+        "content": "Tool execution aborted: Repetitive loop detected"
+    }
+    self.messages.append(dummy_tool_message)
+```
+
+**Sources**:
+- [Portkey.ai Error Library](https://portkey.ai/error-library/tool-call-response-error-10067): "For every tool_call_id in your assistant message, there is a corresponding tool message"
+- [joseferben.com](https://www.joseferben.com/posts/openai-tool-calls-must-be-followed-by-tool-messages): "The tool call result message must come right after the tool calls message"
+- [ZenML Agent Best Practices](https://www.zenml.io/blog/llm-agents-in-production-architectures-challenges-and-best-practices): "Centralized orchestration tracks global states and implements fallback strategies"
+
+### UTF-8 Encoding: Emoji Handling
+
+**Problem**: The `unicode_escape` decoding in `write_file` and `edit_file` corrupted UTF-8 emojis when the LLM generated proper Unicode characters, transforming `🌙` into mangled bytes like `ð`.
+
+**Solution**: Removed `unicode_escape` decoding and rely solely on explicit `encoding='utf-8'` parameter in file operations, as UTF-8 natively handles emojis without escape sequence processing.
+
+**Implementation** (`src/clio/agent/tools.py`):
+```python
+# Write file with explicit UTF-8 encoding to preserve emojis and Unicode
+async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
+    await f.write(content)
+```
+
+**Sources**:
+- [Python Unicode HOWTO](https://docs.python.org/3/howto/unicode.html): "Always explicitly specify `encoding='utf-8'` when opening files"
+- [OpenAI Community](https://community.openai.com/t/gpt-4-1106-preview-messes-up-function-call-parameters-encoding/478500): GPT-4 variants have documented UTF-8 encoding issues in tool call parameters
+- [Compile7](https://compile7.org/character-encoding-decoding/how-to-handle-character-encoding-with-utf-8-in-python/): "UTF-8 encoding handles emojis natively - explicit parameter prevents data corruption"
 
 ---
 

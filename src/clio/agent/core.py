@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import random
 import re
 from typing import List, Dict, Any, Optional, Callable, Awaitable
 from ..providers import Provider, Message, create_provider
@@ -122,9 +123,19 @@ class Agent:
         )
 
         # Create or resume conversation in database
+        self.original_working_dir = None
+        self.recent_files = []  # Track files worked on in this conversation
         if self.conversation_id:
             # Resume existing conversation - load recent messages only
             messages = self.history_db.get_conversation_messages(self.conversation_id)
+
+            # Get conversation metadata (working directory, etc.)
+            conversation = self.history_db.get_conversation(self.conversation_id)
+            if conversation:
+                self.original_working_dir = conversation.get('working_dir')
+
+            # Extract recently edited/written files from full history (for context)
+            self.recent_files = self._extract_recent_files(messages)
 
             # Use hybrid approach: last 20 messages verbatim, RAG for older context
             # (RAG retrieval happens per-query in chat() method)
@@ -140,6 +151,7 @@ class Agent:
         else:
             # Create new conversation
             working_dir = os.getcwd()
+            self.original_working_dir = working_dir
             self.conversation_id = self.history_db.create_conversation(
                 working_dir=working_dir,
                 model=self.current_model,
@@ -148,53 +160,11 @@ class Agent:
 
         # System prompt - Based on Qwen3 best practices: keep concise, single-purpose
         # Load system prompt from config, or use default
-        default_system_prompt = """You are a coding assistant that directly edits files using tools.
-
-@ MENTIONS: When user writes @filename or @path, strip the @ prefix before using in tool calls.
-Example: "@clio/" → list_directory("clio/")
-
-When user says "@file change X to Y", immediately:
-1. read_file("file")
-2. edit_file("file", "X", "Y")
-3. Respond: "Changed X to Y"
-
-INVESTIGATION FIRST:
-- ALWAYS read files before editing them - never speculate about code you haven't seen
-- If a file/path doesn't exist, search for similar names before reporting failure
-- Use grep_files or find_files to locate items before claiming they don't exist
-- Investigate thoroughly using available tools before asking the user for clarification
-
-ERROR RECOVERY:
-- If a tool fails, investigate why and try alternative approaches
-- If searching returns no results, try variations: case-insensitive, partial matches, different directories
-- Report what you tried when something fails: "Searched X, Y, and Z but didn't find [item]. Did you mean [suggestion]?"
-- When multiple matches exist, briefly list them and ask which one to use
-
-SPELLING & TYPOS:
-- Auto-correct obvious typos and misspellings in user requests
-- Use context clues to infer intended meaning (e.g., "Securtoy" → "Security")
-- Don't ask for clarification on minor spelling errors - just proceed with the corrected version
-
-WHEN TO ASK VS PROCEED:
-- Typos/spelling errors: auto-correct and proceed
-- Missing files: search for similar names, suggest alternatives if found, ask if nothing found
-- Ambiguous requirements: infer the most useful action and state your assumption briefly
-- Multiple valid interpretations: proceed with the most likely, mention the assumption
-
-RESPONSE RULES:
-- Be concise but helpful. Brief explanations are OK when they prevent confusion
-- No greetings, pleasantries, or filler like "Let me know" or "Feel free to ask"
-- Answer questions with minimum viable words: "Yes" not "Yes, I can do that"
-- Never explain unless asked "why" or "how", OR when reporting an error/assumption
-- Execute tool calls immediately without narration
-
-Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory"""
-
-        # Use custom system prompt from config if provided
+        from .constants import DEFAULT_SYSTEM_PROMPT
         from ..config.manager import ConfigManager
         config_manager = ConfigManager()
         config = config_manager.load()
-        self.system_prompt = config.preferences.system_prompt or default_system_prompt
+        self.system_prompt = config.preferences.system_prompt or DEFAULT_SYSTEM_PROMPT
 
     def _reconstruct_messages(self, db_messages: List[Dict]) -> List[Message]:
         """Reconstruct messages from database format to API format.
@@ -222,59 +192,40 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
 
             # Handle assistant messages with tool_calls
             if msg["role"] == "assistant" and msg.get("tool_calls"):
+                # Skip assistant messages that ONLY have tool_calls with no text response
+                # Since we're skipping tool results, these incomplete messages are useless
+                if not msg.get("content") or not msg["content"].strip():
+                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                        f.write(f"  {i}: SKIPPING assistant with tool_calls but no content\n")
+                    self.session_logger.logger.info(
+                        "Skipping assistant message with only tool_calls (no text response)"
+                    )
+                    continue
+
                 try:
                     tool_calls = json.loads(msg["tool_calls"])
-                    message["tool_calls"] = tool_calls
-
-                    # Extract tool_call_ids for matching with subsequent tool messages
-                    pending_tool_call_ids.extend([tc["id"] for tc in tool_calls])
+                    # Don't include tool_calls in the reconstructed message - they're not useful without results
+                    # message["tool_calls"] = tool_calls
 
                     with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-                        f.write(f"  {i}: Added {len(tool_calls)} pending tool_call_ids\n")
+                        f.write(f"  {i}: Stripped {len(tool_calls)} tool_calls from assistant message\n")
                 except (json.JSONDecodeError, TypeError):
                     # If tool_calls is malformed, skip it
                     self.session_logger.logger.warning("Malformed tool_calls JSON in database")
                     pass
 
-            # Handle tool messages
+            # Handle tool messages - SKIP THEM to save tokens (observation masking)
+            # Tool results are ephemeral - the assistant's response already captures what it learned
             elif msg["role"] == "tool":
-                if msg.get("tool_call_id"):
-                    # New format: tool_call_id is saved in database
-                    # But check if this tool_call_id is in our pending list
-                    # If not, it means the parent assistant message was truncated (outside 20-message window)
-                    if msg["tool_call_id"] not in pending_tool_call_ids:
-                        with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-                            f.write(f"  {i}: SKIPPING tool message - parent assistant truncated\n")
-                        self.session_logger.logger.info(
-                            "Skipping tool message whose parent assistant was truncated"
-                        )
-                        continue
-
-                    message["tool_call_id"] = msg["tool_call_id"]
-                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-                        f.write(f"  {i}: Using saved tool_call_id: {msg['tool_call_id']}\n")
-
-                    # Remove this tool_call_id from pending list to mark it as fulfilled
+                with open("/tmp/clio_reconstruct_debug.log", "a") as f:
+                    f.write(f"  {i}: SKIPPING tool message to save tokens (observation masking)\n")
+                self.session_logger.logger.info(
+                    "Skipping tool message when loading history (observation masking)"
+                )
+                # Remove from pending list if present to keep tracking consistent
+                if msg.get("tool_call_id") and msg["tool_call_id"] in pending_tool_call_ids:
                     pending_tool_call_ids.remove(msg["tool_call_id"])
-                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-                        f.write(f"  {i}: Removed from pending (remaining: {len(pending_tool_call_ids)})\n")
-                elif pending_tool_call_ids:
-                    # Old format: reconstruct by matching with pending tool_call_ids
-                    message["tool_call_id"] = pending_tool_call_ids.pop(0)
-                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-                        f.write(f"  {i}: Reconstructed tool_call_id (pending left: {len(pending_tool_call_ids)})\n")
-                    self.session_logger.logger.info(
-                        f"Reconstructed tool_call_id for old tool message"
-                    )
-                else:
-                    # Orphaned tool message with no preceding assistant tool_call
-                    # This shouldn't happen but handle gracefully by skipping
-                    with open("/tmp/clio_reconstruct_debug.log", "a") as f:
-                        f.write(f"  {i}: SKIPPING orphaned tool message\n")
-                    self.session_logger.logger.warning(
-                        "Skipping orphaned tool message (no matching tool_call_id)"
-                    )
-                    continue
+                continue
 
             reconstructed.append(message)
 
@@ -360,6 +311,38 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             f.write(f"\n=== FINAL: {len(cleaned)} messages reconstructed (from {len(reconstructed)} before cleanup) ===\n")
 
         return cleaned
+
+    def _extract_recent_files(self, messages: List[Dict]) -> List[str]:
+        """Extract file paths from tool calls in conversation history.
+
+        Scans assistant messages for write_file, edit_file tool calls
+        and returns unique file paths (most recent first).
+        """
+        files = []
+        seen = set()
+
+        # Iterate in reverse to get most recent files first
+        for msg in reversed(messages):
+            if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+                try:
+                    tool_calls = json.loads(msg['tool_calls']) if isinstance(msg['tool_calls'], str) else msg['tool_calls']
+                    for call in tool_calls:
+                        func = call.get('function', {})
+                        name = func.get('name')
+                        if name in ['write_file', 'edit_file']:
+                            try:
+                                args = json.loads(func.get('arguments', '{}'))
+                                path = args.get('path')
+                                if path and path not in seen:
+                                    files.append(path)
+                                    seen.add(path)
+                            except:
+                                pass
+                except:
+                    pass
+
+        # Return up to 10 most recent files
+        return files[:10]
 
     async def switch_model(self, provider_name: str, model: str) -> None:
         """Switch to a different provider and model."""
@@ -483,10 +466,19 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 self.session_logger.logger.info(f"Retrieved {len(rag_context)} relevant messages via RAG")
 
         # Build context with system prompt + RAG context + recent messages
-        # Add current date to system prompt dynamically
+        # Add current date and working directory to system prompt dynamically
         from datetime import datetime
         current_date = datetime.now().strftime("%B %d, %Y")  # e.g., "December 31, 2025"
         system_prompt_with_date = f"{self.system_prompt}\n\nCurrent date: {current_date}"
+
+        # Add working directory context if resuming a conversation
+        if self.original_working_dir and os.getcwd() != self.original_working_dir:
+            system_prompt_with_date += f"\n\nNote: This conversation was originally started in: {self.original_working_dir}"
+
+        # Add recently edited files context if resuming
+        if self.recent_files:
+            files_list = "\n".join(f"  - {f}" for f in self.recent_files[:5])
+            system_prompt_with_date += f"\n\nFiles you recently worked on in this conversation:\n{files_list}"
 
         messages = [{"role": "system", "content": system_prompt_with_date}]
 
@@ -502,8 +494,76 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 "content": rag_summary
             })
 
-        # Add recent messages
-        messages.extend(self.messages)
+        # Apply sliding window: keep only last N messages to prevent unbounded growth
+        # This prevents token explosion during long sessions
+        # Reduced from 40 to 20 to handle code-heavy conversations
+        MAX_CONTEXT_MESSAGES = 20  # Keep last 20 messages (10 user/assistant pairs)
+
+        # Take only recent messages
+        recent_messages = self.messages[-MAX_CONTEXT_MESSAGES:] if len(self.messages) > MAX_CONTEXT_MESSAGES else self.messages
+
+        # Additional safety: Estimate tokens and truncate further if needed
+        # Use tiktoken for accurate token counting
+        MAX_CONTEXT_TOKENS = 15000  # Conservative limit to leave room for response
+
+        try:
+            import tiktoken
+            # Get encoding for current model (fallback to cl100k_base for GPT-4/Claude)
+            try:
+                encoding = tiktoken.encoding_for_model(self.current_model)
+            except KeyError:
+                # Model not recognized, use cl100k_base (GPT-4, Claude, most modern models)
+                encoding = tiktoken.get_encoding("cl100k_base")
+
+            # Count tokens accurately
+            estimated_tokens = 0
+            for msg in recent_messages:
+                content = str(msg.get('content', ''))
+                estimated_tokens += len(encoding.encode(content))
+                # Add overhead for role, function calls, etc.
+                estimated_tokens += 4  # Rough overhead per message
+
+        except ImportError:
+            # Fallback to character-based estimation if tiktoken not available
+            estimated_tokens = sum(len(str(msg.get('content', ''))) // 4 for msg in recent_messages)
+
+        # If still too large, aggressively reduce to last 10 messages
+        if estimated_tokens > MAX_CONTEXT_TOKENS:
+            recent_messages = self.messages[-10:] if len(self.messages) > 10 else self.messages
+            self.session_logger.logger.warning(
+                f"Context reduced to last 10 messages due to token count: {estimated_tokens}"
+            )
+
+        # Add recent messages (with observation masking for tool results)
+        # Skip tool results that have already been processed by a subsequent assistant message
+        # Build a set of tool_call_ids that have been responded to
+        processed_tool_ids = set()
+
+        # Scan messages to find which tool results have been followed by assistant responses
+        for i in range(len(recent_messages)):
+            msg = recent_messages[i]
+
+            # When we see an assistant message WITHOUT tool_calls, it means it processed
+            # the tool results that came before it
+            if msg["role"] == "assistant" and not msg.get("tool_calls"):
+                # Look backwards to find tool messages before this assistant response
+                for j in range(i - 1, -1, -1):
+                    if recent_messages[j]["role"] == "tool":
+                        tool_call_id = recent_messages[j].get("tool_call_id")
+                        if tool_call_id:
+                            processed_tool_ids.add(tool_call_id)
+                    elif recent_messages[j]["role"] == "assistant":
+                        # Stop when we hit another assistant message
+                        break
+
+        # Add messages, skipping tool results that have been processed
+        for msg in recent_messages:
+            # Skip tool messages that have already been responded to
+            if msg["role"] == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                if tool_call_id and tool_call_id in processed_tool_ids:
+                    continue
+            messages.append(msg)
 
         # Get tool definitions
         tools = self.tools.get_tool_definitions()
@@ -529,8 +589,15 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         )
 
         # Call LLM
-        max_iterations = 10
+        max_iterations = 25
         iteration = 0
+        rate_limit_retries = 0  # Track 429-specific retries
+        MAX_RATE_LIMIT_RETRIES = 5  # Max retries for rate limit errors
+
+        # Repetitive action detection (sliding window)
+        recent_tool_calls = []  # Track last 3 tool calls to detect loops
+        recent_tool_results = []  # Track results to show user what failed
+        MAX_IDENTICAL_CALLS = 3  # Terminate if same tool call repeats 3 times
 
         while iteration < max_iterations:
             iteration += 1
@@ -542,11 +609,58 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                     model=self.current_model,
                     tools=tools
                 )
+                # Reset retry counter on successful request
+                rate_limit_retries = 0
+
             except asyncio.CancelledError:
                 # Re-raise cancellation to propagate to UI
                 raise
             except Exception as e:
-                error_msg = f"❌ API Error: {str(e)}"
+                error_str = str(e)
+
+                # Handle 429 rate limit errors with automatic retry
+                if "429" in error_str or "rate_limit_exceeded" in error_str:
+                    rate_limit_retries += 1
+
+                    # Check if exceeded max retries
+                    if rate_limit_retries > MAX_RATE_LIMIT_RETRIES:
+                        error_msg = f"❌ Rate limit exceeded after {MAX_RATE_LIMIT_RETRIES} retries. Please try again later."
+                        self.session_logger.log_error(error_msg)
+                        return error_msg
+
+                    # Extract wait time from error message (e.g., "Please try again in 7.806s")
+                    wait_match = re.search(r'try again in ([\d.]+)([ms])', error_str)
+                    if wait_match:
+                        wait_time = float(wait_match.group(1))
+                        unit = wait_match.group(2)
+                        # Convert to seconds if needed
+                        if unit == 'ms':
+                            wait_time = wait_time / 1000
+
+                        # Add jitter (0-1 second randomization)
+                        jitter = random.uniform(0, 1)
+                        total_wait = wait_time + 0.5 + jitter
+
+                        self.session_logger.logger.warning(
+                            f"Rate limit hit (attempt {rate_limit_retries}/{MAX_RATE_LIMIT_RETRIES}), "
+                            f"waiting {total_wait:.2f}s before retry"
+                        )
+                        await asyncio.sleep(total_wait)
+                        continue  # Retry the same iteration
+                    else:
+                        # No wait time found, use exponential backoff with jitter
+                        base_wait = min(2 ** (rate_limit_retries - 1), 60)  # Cap at 60s
+                        jitter = random.uniform(0, 3)  # 0-3 second jitter
+                        total_wait = base_wait + jitter
+
+                        self.session_logger.logger.warning(
+                            f"Rate limit hit (attempt {rate_limit_retries}/{MAX_RATE_LIMIT_RETRIES}), "
+                            f"waiting {total_wait:.2f}s before retry"
+                        )
+                        await asyncio.sleep(total_wait)
+                        continue  # Retry the same iteration
+
+                error_msg = f"❌ API Error: {error_str}"
                 self.session_logger.log_error(error_msg)
                 return error_msg
 
@@ -609,11 +723,64 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                     error_msg = f"⚠️ Model returned empty response (finish_reason: {choice['finish_reason']})"
                     self.session_logger.log_error(error_msg)
                     return f"{error_msg}\nThis may indicate the model refused to respond or encountered an error."
+
+                # Trim in-memory messages to prevent unbounded growth
+                # Keep only last 20 messages (full history is in database)
+                # Reduced to prevent 429 rate limit errors in code-heavy conversations
+                MAX_CONTEXT_MESSAGES = 20
+                if len(self.messages) > MAX_CONTEXT_MESSAGES:
+                    trimmed_count = len(self.messages) - MAX_CONTEXT_MESSAGES
+                    self.messages = self.messages[-MAX_CONTEXT_MESSAGES:]
+                    self.session_logger.logger.info(
+                        f"Trimmed {trimmed_count} old messages from memory (retained in database)"
+                    )
+
                 # Strip thinking tags before returning
                 return strip_thinking_tags(content)
             
             # Execute tool calls
             if message.get("tool_calls"):
+                # Check for repetitive tool calls (loop detection)
+                for tool_call in message["tool_calls"]:
+                    function = tool_call["function"]
+                    tool_signature = f"{function['name']}:{function['arguments']}"
+
+                    # Add to sliding window
+                    recent_tool_calls.append(tool_signature)
+                    if len(recent_tool_calls) > MAX_IDENTICAL_CALLS:
+                        recent_tool_calls.pop(0)  # Keep only last 3
+
+                    # Check if all recent calls are identical
+                    if len(recent_tool_calls) == MAX_IDENTICAL_CALLS and len(set(recent_tool_calls)) == 1:
+                        # Get the last error message to show user what failed
+                        last_result = recent_tool_results[-1][1] if recent_tool_results else "Unknown error"
+                        # Truncate long error messages
+                        if len(last_result) > 200:
+                            last_result = last_result[:200] + "..."
+
+                        error_msg = (
+                            f"❌ Repetitive loop detected: Same tool call repeated {MAX_IDENTICAL_CALLS} times.\n\n"
+                            f"**Tool**: {function['name']}\n\n"
+                            f"**What the agent tried**:\n{function['arguments']}\n\n"
+                            f"**Error that kept occurring**:\n{last_result}\n\n"
+                            f"The agent appears stuck trying the same operation that keeps failing.\n"
+                            f"Please rephrase your request or try a different approach."
+                        )
+                        self.session_logger.log_error(error_msg)
+
+                        # Add dummy tool responses to satisfy API contract
+                        # This prevents "assistant message with 'tool_calls' must be followed by tool messages" error
+                        for tc in message["tool_calls"]:
+                            dummy_tool_message = {
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": "Tool execution aborted: Repetitive loop detected"
+                            }
+                            self.messages.append(dummy_tool_message)
+                            messages.append(dummy_tool_message)
+
+                        return error_msg
+
                 # Begin batching edits
                 self.tools.begin_batch()
 
@@ -631,6 +798,11 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
 
                     # Execute tool
                     result = await self.tools.execute_tool(tool_name, arguments)
+
+                    # Track tool results for loop detection
+                    recent_tool_results.append((tool_name, result))
+                    if len(recent_tool_results) > MAX_IDENTICAL_CALLS:
+                        recent_tool_results.pop(0)
 
                     # Log tool result
                     self.session_logger.log_tool_result(tool_name, result)

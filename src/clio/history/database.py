@@ -300,6 +300,20 @@ class HistoryDatabase:
 
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_conversation(self, conversation_id: int) -> Optional[Dict]:
+        """Get conversation details by ID.
+
+        Args:
+            conversation_id: Conversation ID
+
+        Returns:
+            Conversation dictionary or None if not found
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
     def get_conversation_messages(self, conversation_id: int) -> List[Dict]:
         """Get all messages from a conversation.
 

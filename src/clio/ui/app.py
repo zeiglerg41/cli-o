@@ -3,6 +3,7 @@ import asyncio
 import subprocess
 import shutil
 import os
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -112,7 +113,6 @@ class AutocompleteTextArea(TextArea):
 
 try:
     from .file_autocomplete import FileAutoComplete
-    from .command_autocomplete import CommandAutoComplete
     HAS_AUTOCOMPLETE = True
 except ImportError:
     HAS_AUTOCOMPLETE = False
@@ -380,6 +380,17 @@ class ChatApp(App):
         display: none;
     }
 
+    #tool-indicator {
+        height: 1;
+        width: 100%;
+        padding: 0 2;
+        background: $surface;
+    }
+
+    #tool-indicator.hidden {
+        display: none;
+    }
+
     #input-container {
         height: auto;
         width: 100%;
@@ -426,10 +437,12 @@ class ChatApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear", "Clear", show=True),
+        Binding("f2", "toggle_mouse", "Toggle Mouse", show=False),
     ]
 
     # Enable terminal text selection by not capturing mouse events
     # Users can hold Shift and select text with the mouse
+    # Or press F2 to toggle mouse mode on/off
     ENABLE_COMMAND_PALETTE = False
     
     def __init__(self, launch_dir: Optional[str] = None, conversation_id: Optional[int] = None):
@@ -486,6 +499,9 @@ class ChatApp(App):
         self.thinking_timer = None
         self.thinking_frame = 0
 
+        # Query elapsed time tracking
+        self.query_start_time: Optional[float] = None
+
         # Display messages for responsive re-rendering on resize
         self.display_messages: List[tuple] = []  # (content, title, border_style)
 
@@ -513,6 +529,9 @@ class ChatApp(App):
 
         # Thinking indicator (hidden by default, shown during processing)
         yield Static("", id="thinking-indicator", classes="hidden")
+
+        # Tool execution indicator (hidden by default, shown during tool calls)
+        yield Static("", id="tool-indicator", classes="hidden")
 
         # Input container
         with Container(id="input-container"):
@@ -574,7 +593,7 @@ class ChatApp(App):
     def _register_commands(self) -> None:
         """Register slash commands."""
         self.command_router.register("/help", self._cmd_help, "Show help message")
-        self.command_router.register("/clear", self._cmd_clear, "Clear conversation history")
+        self.command_router.register("/clear", self._cmd_clear, "Clear conversation history (current session only)")
         self.command_router.register("/exit", self._cmd_exit, "Exit the application")
         self.command_router.register("/model", self._cmd_model, "List and switch models")
         self.command_router.register("/config", self._cmd_config, "Edit configuration file")
@@ -582,8 +601,8 @@ class ChatApp(App):
         self.command_router.register("/copy", self._cmd_copy, "Copy last assistant response")
         self.command_router.register("/export", self._cmd_export, "Export conversation to markdown")
         self.command_router.register("/history", self._cmd_history, "Resume a previous conversation")
-        self.command_router.register("/cleanup", self._cmd_cleanup, "Delete old conversations")
-        self.command_router.register("/usage", self._cmd_usage, "Show token usage and cost breakdown")
+        self.command_router.register("/cleanup", self._cmd_cleanup, "Delete old conversations (from database)")
+        self.command_router.register("/usage", self._cmd_usage, "Show token usage statistics")
         self.command_router.register("/web", lambda args: "", "Search the web")  # Handled specially in on_input_submitted
     
     def _cmd_help(self, args: str) -> str:
@@ -600,7 +619,7 @@ class ChatApp(App):
 - `/export [filename]` - Export conversation to markdown file
 - `/history` - Resume a previous conversation (interactive selection)
 - `/cleanup` - Delete old conversations (keep only 20 most recent)
-- `/usage` - Show token usage and cost breakdown for this month
+- `/usage` - Show token usage statistics (links to provider billing dashboard)
 - `/web <query>` - Search the web and get AI response
 
 **Working with Files:**
@@ -928,7 +947,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             return "✓ No old conversations to delete"
 
     async def _cmd_usage(self, args: str) -> str:
-        """Show usage statistics and costs."""
+        """Show token usage statistics."""
         from datetime import datetime
 
         # Get monthly usage from local database
@@ -937,97 +956,93 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         if not monthly_usage:
             return "No usage data for this month yet."
 
-        # Check if we have an admin API key to fetch actual costs
+        # Get current provider info
         config = self.config_manager.load()
         current_provider_config = config.providers.get(self.agent.current_provider_name)
-        admin_api_key = current_provider_config.adminApiKey if current_provider_config else None
+        provider_type = current_provider_config.type if current_provider_config else "unknown"
 
-        actual_costs = None
-        using_actual_costs = False
-
-        if admin_api_key and current_provider_config.type == "openai":
-            # Show thinking indicator in chat log while fetching billing data
-            chat_log = self.query_one("#chat-log", RichLog)
-            chat_log.write("[dim]Fetching billing data...[/dim]")
-
-            # Fetch actual costs from OpenAI billing API (async, won't block UI)
-            try:
-                from ..billing import fetch_openai_costs
-                actual_costs = await fetch_openai_costs(admin_api_key)
-                using_actual_costs = True
-            except Exception as e:
-                # Fall back to estimated costs if API fails
-                pass
+        # Map provider types to usage dashboard URLs
+        provider_dashboards = {
+            "openai": "https://platform.openai.com/usage",
+            "anthropic": "https://console.anthropic.com/settings/usage",
+            "gemini": "https://aistudio.google.com/app/usage",
+            "deepseek": "https://platform.deepseek.com/usage",
+            "grok": "https://console.x.ai/",
+        }
 
         # Format table
         month_name = datetime.now().strftime("%B %Y")
-        lines = [f"📊 **{month_name} Usage**\n"]
-
-        # Add note about pricing source
-        if using_actual_costs:
-            lines.append("_✅ Showing actual billing data from provider API._")
-            lines.append("_Models marked with * were used outside clio (no token counts available)._\n")
-        else:
-            lines.append("_Note: Token counts are accurate. Costs are estimated based on published pricing._")
-            lines.append("_For actual billing data, add an admin API key to your config. See README for details._\n")
+        lines = [f"**{month_name} Token Usage**\n"]
 
         lines.append("```")
 
         # Table header with fixed column widths
-        lines.append(f"{'Model':<16} {'In Tokens':>10} {'Out Tokens':>12} {'Cost':>8}")
-        lines.append("─" * 50)
+        lines.append(f"{'Model':<20} {'In Tokens':>12} {'Out Tokens':>12}")
+        lines.append("─" * 48)
 
         # Table rows
         total_in = 0
         total_out = 0
-        total_cost = 0.0
-        models_shown = set()
 
-        # First show models from database usage
         for row in monthly_usage:
             model = row['model']
             in_tokens = row['prompt_tokens']
             out_tokens = row['completion_tokens']
 
-            # Use actual cost if available, otherwise use estimated cost
-            if using_actual_costs and actual_costs and model in actual_costs:
-                cost = actual_costs[model]
-            else:
-                cost = row['total_cost']
-
             total_in += in_tokens
             total_out += out_tokens
-            total_cost += cost
-            models_shown.add(model)
 
-            # Format tokens (K for thousands)
-            in_k = f"{in_tokens / 1000:.1f}K" if in_tokens >= 1000 else str(in_tokens)
-            out_k = f"{out_tokens / 1000:.1f}K" if out_tokens >= 1000 else str(out_tokens)
+            # Format tokens (K for thousands, M for millions)
+            if in_tokens >= 1_000_000:
+                in_display = f"{in_tokens / 1_000_000:.1f}M"
+            elif in_tokens >= 1000:
+                in_display = f"{in_tokens / 1000:.1f}K"
+            else:
+                in_display = str(in_tokens)
+
+            if out_tokens >= 1_000_000:
+                out_display = f"{out_tokens / 1_000_000:.1f}M"
+            elif out_tokens >= 1000:
+                out_display = f"{out_tokens / 1000:.1f}K"
+            else:
+                out_display = str(out_tokens)
 
             # Format model name (truncate if needed)
-            model_display = model[:16].ljust(16)
+            model_display = model[:20].ljust(20)
 
-            lines.append(f"{model_display} {in_k:>10} {out_k:>12} ${cost:>7.2f}")
-
-        # Add "Other" row for models from actual_costs that weren't used through clio
-        if using_actual_costs and actual_costs:
-            other_cost = 0.0
-            for model, cost in actual_costs.items():
-                if model not in models_shown:
-                    other_cost += cost
-
-            if other_cost > 0:
-                total_cost += other_cost
-                model_display = "Other *".ljust(16)  # * indicates external usage
-                lines.append(f"{model_display} {'—':>10} {'—':>12} ${other_cost:>7.2f}")
+            lines.append(f"{model_display} {in_display:>12} {out_display:>12}")
 
         # Total row
         lines.append("")  # Blank line before total
-        lines.append("─" * 50)
-        total_in_k = f"{total_in / 1000:.1f}K" if total_in >= 1000 else str(total_in)
-        total_out_k = f"{total_out / 1000:.1f}K" if total_out >= 1000 else str(total_out)
-        lines.append(f"{'Total':<16} {total_in_k:>10} {total_out_k:>12} ${total_cost:>7.2f}")
-        lines.append("```")
+        lines.append("─" * 48)
+
+        # Format totals
+        if total_in >= 1_000_000:
+            total_in_display = f"{total_in / 1_000_000:.1f}M"
+        elif total_in >= 1000:
+            total_in_display = f"{total_in / 1000:.1f}K"
+        else:
+            total_in_display = str(total_in)
+
+        if total_out >= 1_000_000:
+            total_out_display = f"{total_out / 1_000_000:.1f}M"
+        elif total_out >= 1000:
+            total_out_display = f"{total_out / 1000:.1f}K"
+        else:
+            total_out_display = str(total_out)
+
+        lines.append(f"{'Total':<20} {total_in_display:>12} {total_out_display:>12}")
+        lines.append("```\n")
+
+        # Add provider dashboard link if available
+        if provider_type in provider_dashboards:
+            dashboard_url = provider_dashboards[provider_type]
+            lines.append(f"**For billing details, see your provider dashboard:**")
+            lines.append(f"   → {dashboard_url}")
+        elif provider_type == "openai-compatible":
+            lines.append("**Note:** Self-hosted provider - no billing charges.")
+        else:
+            lines.append("**Note:** Token usage tracked locally. Check your provider for billing details.")
 
         return "\n".join(lines)
 
@@ -1595,6 +1610,9 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             self.thinking_frame = 0
             self.thinking_timer = self.set_interval(0.15, self._animate_thinking)
 
+            # Start elapsed time tracking
+            self.query_start_time = time.time()
+
             # Use Textual worker for cancellable background operation (don't await!)
             self.current_query_worker = self.run_worker(
                 self.agent.chat(actual_message, context),
@@ -1609,7 +1627,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         status_bar.update(self._get_status_text())
 
     def _animate_thinking(self) -> None:
-        """Animate the thinking indicator dots."""
+        """Animate the thinking indicator dots with elapsed time."""
         frames = [
             "Thinking.  ",
             "Thinking.. ",
@@ -1622,7 +1640,13 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         try:
             thinking_indicator = self.query_one("#thinking-indicator", Static)
             if "hidden" not in thinking_indicator.classes:
-                thinking_indicator.update(f"[dim]{frames[self.thinking_frame]}[/dim]")
+                # Calculate elapsed time
+                elapsed_text = ""
+                if self.query_start_time is not None:
+                    elapsed = time.time() - self.query_start_time
+                    elapsed_text = f" ({elapsed:.1f}s)"
+
+                thinking_indicator.update(f"[dim]{frames[self.thinking_frame]}{elapsed_text}[/dim]")
         except:
             if self.thinking_timer:
                 self.thinking_timer.stop()
@@ -1644,6 +1668,20 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         # Check config auto-approve or session auto-approve
         if config.preferences.auto_approve or self.auto_approve_session:
             return True
+
+        # Auto-approve safe read-only bash commands
+        if operation == "execute_bash":
+            # Extract command from details (format: "Run command: <cmd>")
+            if details.startswith("Run command: "):
+                command = details[len("Run command: "):].strip()
+                # List of safe read-only command prefixes
+                safe_commands = [
+                    'find ', 'ls ', 'grep ', 'rg ', 'cat ', 'head ', 'tail ',
+                    'pwd', 'which ', 'whereis ', 'file ', 'stat ', 'wc ',
+                    'echo ', 'printf ', 'tree ', 'du ', 'df ', 'env', 'printenv'
+                ]
+                if any(command.startswith(cmd) for cmd in safe_commands):
+                    return True
 
         # Show permission prompt
         from rich.text import Text
@@ -1729,11 +1767,21 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             thinking_indicator = self.query_one("#thinking-indicator", Static)
             thinking_indicator.add_class("hidden")
 
+            # Hide tool indicator
+            tool_indicator = self.query_one("#tool-indicator", Static)
+            tool_indicator.add_class("hidden")
+
             response = event.worker.result
             chat_log = self.query_one("#chat-log", RichLog)
 
             # Write assistant response
             self._write_message(RichMarkdown(response), title=colors["assistant_title"], border_style=colors["assistant_color"])
+
+            # Display elapsed time
+            if self.query_start_time is not None:
+                elapsed = time.time() - self.query_start_time
+                chat_log.write(f"[dim]Completed in {elapsed:.1f}s[/dim]")
+                self.query_start_time = None
 
             # Save to history
             self.last_assistant_response = response
@@ -1751,6 +1799,13 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             thinking_indicator = self.query_one("#thinking-indicator", Static)
             thinking_indicator.add_class("hidden")
 
+            # Hide tool indicator
+            tool_indicator = self.query_one("#tool-indicator", Static)
+            tool_indicator.add_class("hidden")
+
+            # Reset timer
+            self.query_start_time = None
+
             # Clear worker reference
             self.current_query_worker = None
 
@@ -1762,6 +1817,13 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 self.thinking_timer = None
             thinking_indicator = self.query_one("#thinking-indicator", Static)
             thinking_indicator.add_class("hidden")
+
+            # Hide tool indicator
+            tool_indicator = self.query_one("#tool-indicator", Static)
+            tool_indicator.add_class("hidden")
+
+            # Reset timer
+            self.query_start_time = None
 
             # Show error
             error = event.worker.error
@@ -1776,35 +1838,36 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             self.current_query_worker = None
 
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
-        """Handle tool execution notification - display in chat log in real-time."""
+        """Handle tool execution notification - update tool indicator in real-time."""
         # Format tool call nicely
         if tool_name == "edit_file":
             path = arguments.get("path", "unknown")
             old_len = len(arguments.get("old_text", ""))
             new_len = len(arguments.get("new_text", ""))
-            tool_display = f"🔧 {tool_name}: {path} (replaced {old_len} chars with {new_len} chars)"
+            tool_display = f"[bold]{tool_name}[/bold]: {path} (replaced {old_len} chars with {new_len} chars)"
         elif tool_name == "write_file":
             path = arguments.get("path", "unknown")
             content_len = len(arguments.get("content", ""))
-            tool_display = f"✍️  {tool_name}: {path} ({content_len} chars)"
+            tool_display = f"[bold]{tool_name}[/bold]: {path} ({content_len} chars)"
         elif tool_name == "read_file":
             path = arguments.get("path", "unknown")
-            tool_display = f"📖 {tool_name}: {path}"
+            tool_display = f"[bold]{tool_name}[/bold]: {path}"
         elif tool_name == "execute_bash":
             command = arguments.get("command", "unknown")
-            tool_display = f"💻 {tool_name}: {command}"
+            tool_display = f"[bold]{tool_name}[/bold]: {command}"
         elif tool_name == "list_directory":
             path = arguments.get("path", ".")
-            tool_display = f"📁 {tool_name}: {path}"
+            tool_display = f"[bold]{tool_name}[/bold]: {path}"
         elif tool_name == "web_search":
             query = arguments.get("query", "unknown")
-            tool_display = f"🔍 {tool_name}: {query}"
+            tool_display = f"[bold]{tool_name}[/bold]: {query}"
         else:
-            tool_display = f"🔧 {tool_name}: {str(arguments)[:100]}"
+            tool_display = f"[bold]{tool_name}[/bold]: {str(arguments)[:100]}"
 
-        # Display tool execution in chat log
-        chat_log = self.query_one("#chat-log", RichLog)
-        chat_log.write(f"[dim]{tool_display}[/dim]")
+        # Update tool indicator in-place (replaces previous tool call)
+        tool_indicator = self.query_one("#tool-indicator", Static)
+        tool_indicator.update(f"[dim]{tool_display}[/dim]")
+        tool_indicator.remove_class("hidden")
 
     def action_clear(self) -> None:
         """Clear chat log."""
@@ -1812,5 +1875,31 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         chat_log.clear()
         self.display_messages.clear()  # Also clear stored messages
         self.agent.clear_history()
-        self.conversation_history.clear()
-        self.last_assistant_response = ""
+
+    def action_toggle_mouse(self) -> None:
+        """Toggle mouse support for easier text selection."""
+        from textual.drivers.linux_driver import LinuxDriver
+        driver = self.app._driver
+
+        # Toggle mouse reporting
+        if hasattr(driver, 'mouse_enabled'):
+            driver.mouse_enabled = not driver.mouse_enabled
+            status = "enabled" if driver.mouse_enabled else "disabled"
+        else:
+            # Fallback: Try to toggle via terminal codes
+            import sys
+            if self.mouse_over:
+                # Disable mouse reporting
+                sys.stdout.write('\033[?1000l')  # Disable mouse tracking
+                sys.stdout.flush()
+                self.mouse_over = False
+                status = "disabled"
+            else:
+                # Enable mouse reporting
+                sys.stdout.write('\033[?1000h')  # Enable mouse tracking
+                sys.stdout.flush()
+                self.mouse_over = True
+                status = "enabled"
+
+        chat_log = self.query_one("#chat-log", RichLog)
+        chat_log.write(f"[dim]Mouse {status} - Press F2 to toggle. Hold Shift to select text.[/dim]")

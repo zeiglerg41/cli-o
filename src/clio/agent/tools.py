@@ -104,15 +104,7 @@ class Tools:
             # Create parent directories
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Decode escaped characters (handle LLMs that escape newlines)
-            # Use encode/decode to convert literal \n to actual newlines
-            try:
-                content = content.encode().decode('unicode_escape')
-            except Exception:
-                # If decoding fails, use content as-is
-                pass
-
-            # Write file
+            # Write file with explicit UTF-8 encoding to preserve emojis and Unicode
             async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                 await f.write(content)
 
@@ -123,18 +115,7 @@ class Tools:
     async def edit_file(self, path: str, old_text: str, new_text: str) -> str:
         """Edit a file by replacing old_text with new_text."""
         try:
-            # Decode escaped characters in old_text and new_text
-            try:
-                old_text = old_text.encode().decode('unicode_escape')
-            except Exception:
-                pass
-
-            try:
-                new_text = new_text.encode().decode('unicode_escape')
-            except Exception:
-                pass
-
-            # Read current content
+            # Read current content (already uses UTF-8 encoding)
             content = await self.read_file(path)
 
             if content.startswith("Error:"):

@@ -242,7 +242,6 @@ class AutocompleteOverlay(Container):
         """Format a command as an Option."""
         cmd, desc = cmd_data
         display = Text()
-        display.append("⚡ ", style="bold cyan")
         display.append(f"/{cmd}", style="cyan")
         display.append(f" - {desc}", style="dim")
         return Option(display, id=cmd)

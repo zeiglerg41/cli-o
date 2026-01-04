@@ -59,7 +59,35 @@ export class DiffDecorator {
             await vscode.commands.executeCommand('workbench.action.files.revert');
         }
 
-        const editor = await vscode.window.showTextDocument(document);
+        // Check if file is already open in a visible editor
+        const existingEditor = vscode.window.visibleTextEditors.find(
+            editor => editor.document.uri.fsPath === file
+        );
+
+        let editor: vscode.TextEditor;
+
+        if (existingEditor) {
+            // File is already visible - jump to topmost edit
+            let firstEditLine = edits.length > 0 ? edits[0].range.start.line : 0;
+            for (const edit of edits) {
+                if (edit.range.start.line < firstEditLine) {
+                    firstEditLine = edit.range.start.line;
+                }
+            }
+
+            // Show document and scroll to first edit
+            editor = await vscode.window.showTextDocument(document, {
+                selection: new vscode.Range(firstEditLine, 0, firstEditLine, 0),
+                viewColumn: existingEditor.viewColumn,
+                preserveFocus: false
+            });
+        } else {
+            // File not visible - just open it silently without changing focus
+            editor = await vscode.window.showTextDocument(document, {
+                preview: true,
+                preserveFocus: true
+            });
+        }
 
         const decorations: vscode.DecorationOptions[] = [];
 
