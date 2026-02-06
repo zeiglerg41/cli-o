@@ -56,42 +56,42 @@ class ContextManager:
 
         if file_path is None:
             # Give helpful error with all paths tried
-            return f"❌ File not found: {path}\nTried:\n  - {self.working_dir / path}\n  - {Path.cwd() / path}\n  - {Path(path).absolute()}"
+            return f"File not found: {path}\nTried:\n  - {self.working_dir / path}\n  - {Path.cwd() / path}\n  - {Path(path).absolute()}"
 
         if not file_path.is_file():
-            return f"❌ Not a file: {path}"
+            return f"Not a file: {path}"
         
         # Read file
         try:
             async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
         except UnicodeDecodeError:
-            return f"❌ Cannot read binary file: {path}"
+            return f"Cannot read binary file: {path}"
         except Exception as e:
-            return f"❌ Error reading file: {e}"
+            return f"Error reading file: {e}"
         
         # Check tokens
         tokens = self.count_tokens(content)
         total_tokens = self.get_total_tokens() + tokens
         
         if total_tokens > self.token_limit:
-            return f"❌ Adding file would exceed token limit ({total_tokens} > {self.token_limit})"
+            return f"Adding file would exceed token limit ({total_tokens} > {self.token_limit})"
         
         # Add to context
         str_path = str(file_path)
         self.files[str_path] = content
         
-        return f"✓ Added {path} ({tokens} tokens)"
+        return f"Added {path} ({tokens} tokens)"
     
     async def add_folder(self, path: str, pattern: str = "**/*") -> str:
         """Add folder to context."""
         folder_path = Path(path).resolve()
         
         if not folder_path.exists():
-            return f"❌ Folder not found: {path}"
+            return f"Folder not found: {path}"
         
         if not folder_path.is_dir():
-            return f"❌ Not a folder: {path}"
+            return f"Not a folder: {path}"
         
         # Find all files
         files = list(folder_path.glob(pattern))
@@ -101,15 +101,15 @@ class ContextManager:
         for file_path in files:
             if file_path.is_file():
                 result = await self.add_file(str(file_path))
-                if result.startswith("✓"):
+                if result.startswith("Added"):
                     added += 1
                 else:
                     errors.append(result)
         
         if errors:
-            return f"✓ Added {added} files from {path}\n" + "\n".join(errors[:5])
+            return f"Added {added} files from {path}\n" + "\n".join(errors[:5])
         
-        return f"✓ Added {added} files from {path}"
+        return f"Added {added} files from {path}"
     
     def remove_file(self, path: str) -> str:
         """Remove file from context."""
@@ -118,9 +118,9 @@ class ContextManager:
 
         if file_path in self.files:
             del self.files[file_path]
-            return f"✓ Removed {path}"
+            return f"Removed {path}"
 
-        return f"❌ File not in context: {path}"
+        return f"File not in context: {path}"
     
     def list_files(self) -> list[str]:
         """List all files in context."""

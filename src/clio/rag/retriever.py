@@ -71,7 +71,7 @@ class ContextRetriever:
             logger.error(f"Failed to get/create collection: {e}")
             raise
 
-    def _add_to_collection(self, conversation_id: int, message_id: int, role: str, content: str, embedding: List[float]):
+    def _add_to_collection(self, conversation_id: int, message_id: int, role: str, content: str, embedding: List[float], timestamp: Optional[float] = None):
         """Internal method to add message to collection.
 
         Args:
@@ -80,13 +80,22 @@ class ContextRetriever:
             role: Message role
             content: Message content
             embedding: Pre-computed embedding vector
+            timestamp: Optional timestamp for recency weighting
         """
+        import time
+        if timestamp is None:
+            timestamp = time.time()
+
         collection = self.get_collection(conversation_id)
         collection.add(
             ids=[f"msg_{message_id}"],
             embeddings=[embedding],
             documents=[content],
-            metadatas=[{"role": role, "message_id": message_id}]
+            metadatas={
+                "role": role,
+                "message_id": message_id,
+                "timestamp": timestamp
+            }
         )
 
     async def add_message_async(self, conversation_id: int, message_id: int, role: str, content: str) -> bool:
@@ -194,23 +203,42 @@ class ContextRetriever:
             if not results or not results['ids'] or not results['ids'][0]:
                 return []
 
-            # Parse results
+            # Parse results and apply hybrid scoring (semantic + recency)
+            import time
+            import math
+
+            current_time = time.time()
             retrieved = []
+
             for i in range(len(results['ids'][0])):
                 message_id = results['metadatas'][0][i]['message_id']
                 content = results['documents'][0][i]
                 role = results['metadatas'][0][i]['role']
                 distance = results['distances'][0][i] if 'distances' in results else 0
+                timestamp = results['metadatas'][0][i].get('timestamp', current_time)
+
+                # Calculate semantic similarity (lower distance = higher similarity)
+                semantic_score = 1 - min(distance, 1.0)  # Clamp to [0, 1]
+
+                # Calculate recency score using exponential decay
+                age_seconds = current_time - timestamp
+                age_turns = age_seconds / 60  # Rough estimate: 1 turn ≈ 1 minute
+                recency_score = math.exp(-age_turns / 50)  # Decay over ~50 turns
+
+                # Hybrid scoring: 60% semantic relevance + 40% recency
+                final_score = (semantic_score * 0.6) + (recency_score * 0.4)
 
                 retrieved.append({
                     'message_id': message_id,
                     'role': role,
                     'content': content,
-                    'distance': distance
+                    'distance': distance,
+                    'timestamp': timestamp,
+                    'final_score': final_score
                 })
 
-            # Sort by message_id and filter out recent messages
-            retrieved.sort(key=lambda x: x['message_id'])
+            # Sort by final_score (highest first), then filter out recent messages
+            retrieved.sort(key=lambda x: x['final_score'], reverse=True)
 
             # Find max message_id to determine cutoff
             if retrieved:

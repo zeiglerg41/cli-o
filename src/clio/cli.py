@@ -63,7 +63,7 @@ def main(ctx, show_history, do_cleanup, continue_flag):
             db.close()
             return
 
-        click.echo(f"\n📜 Recent Conversations ({max_recent} most recent):\n")
+        click.echo(f"\nRecent Conversations ({max_recent} most recent):\n")
 
         for conv in conversations:
             conv_id = conv['id']
@@ -71,7 +71,7 @@ def main(ctx, show_history, do_cleanup, continue_flag):
             model = conv['model']
             msg_count = conv['message_count']
             title = conv['title'] or "New conversation"
-            starred = "⭐ " if conv['starred'] else ""
+            starred = "* " if conv['starred'] else ""
             working_dir = Path(conv['working_dir']).name
 
             click.echo(f"  {starred}{title}")
@@ -86,13 +86,13 @@ def main(ctx, show_history, do_cleanup, continue_flag):
     # Handle --cleanup flag
     if do_cleanup:
         db = HistoryDatabase()
-        click.echo("🧹 Cleaning up old conversations...")
+        click.echo("Cleaning up old conversations...")
         deleted = db.cleanup_old_conversations(keep_recent=max_recent)
 
         if deleted:
-            click.echo(f"✓ Deleted {deleted} old conversation(s)")
+            click.echo(f"Deleted {deleted} old conversation(s)")
         else:
-            click.echo("✓ No old conversations to delete")
+            click.echo("No old conversations to delete")
 
         db.close()
         return
@@ -124,10 +124,10 @@ def main(ctx, show_history, do_cleanup, continue_flag):
             msg_count = conv['message_count']
             title = conv['title'] or "New conversation"
             working_dir = Path(conv['working_dir']).name
-            starred = "⭐ " if conv['starred'] else ""
+            starred = "* " if conv['starred'] else ""
 
             # Calculate available space for title
-            # Format: "❯ • {title}  ({time} · {N} msgs · {dir})"
+            # Format: "> • {title}  ({time} · {N} msgs · {dir})"
             # Reserve space for: cursor (3) + bullet (2) + metadata (~35 chars) + margins (5)
             metadata = f"  ({time_ago} · {msg_count} msgs · {working_dir})"
             reserved_space = 3 + 2 + len(metadata) + 5
@@ -149,8 +149,8 @@ def main(ctx, show_history, do_cleanup, continue_flag):
         # Show interactive menu
         terminal_menu = TerminalMenu(
             menu_items,
-            title="Resume Session (↑/↓ to navigate, Enter to select, q to quit)",
-            menu_cursor="❯ ",
+            title="Resume Session (Up/Down to navigate, Enter to select, q to quit)",
+            menu_cursor="> ",
             menu_cursor_style=("fg_cyan", "bold"),
             menu_highlight_style=("fg_cyan", "bold"),
             cursor_index=0,  # Start at first item (top)
@@ -202,7 +202,7 @@ def setup():
     config_manager = ConfigManager()
     config = config_manager.load()
     
-    click.echo("🚀 CLIO Setup")
+    click.echo("CLIO Setup")
     click.echo(f"\nConfiguration file: {config_manager.config_path}")
     click.echo("\nCurrent configuration:")
     click.echo(f"  Provider: {config.defaults.provider}")
@@ -230,7 +230,7 @@ def add_provider(provider_name, url, api_key, type):
     )
     
     config_manager.add_provider(provider_name, provider)
-    click.echo(f"✓ Added provider: {provider_name}")
+    click.echo(f"Added provider: {provider_name}")
 
 
 @main.command()

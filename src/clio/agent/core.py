@@ -391,7 +391,7 @@ class Agent:
                 tool_call_id=tool_call_id
             )
             if rag_model_loaded:
-                self.session_logger.logger.info("✓ RAG embedding model loaded successfully (one-time setup)")
+                self.session_logger.logger.info("RAG embedding model loaded successfully (one-time setup)")
         except Exception as e:
             self.session_logger.logger.error(f"Failed to save message with RAG: {e}")
 
@@ -534,35 +534,23 @@ class Agent:
                 f"Context reduced to last 10 messages due to token count: {estimated_tokens}"
             )
 
-        # Add recent messages (with observation masking for tool results)
-        # Skip tool results that have already been processed by a subsequent assistant message
-        # Build a set of tool_call_ids that have been responded to
-        processed_tool_ids = set()
+        # Add recent messages while maintaining API contract
+        # Track which tool_call_ids have been declared to avoid orphaned tool messages
+        declared_tool_call_ids = set()
 
-        # Scan messages to find which tool results have been followed by assistant responses
-        for i in range(len(recent_messages)):
-            msg = recent_messages[i]
-
-            # When we see an assistant message WITHOUT tool_calls, it means it processed
-            # the tool results that came before it
-            if msg["role"] == "assistant" and not msg.get("tool_calls"):
-                # Look backwards to find tool messages before this assistant response
-                for j in range(i - 1, -1, -1):
-                    if recent_messages[j]["role"] == "tool":
-                        tool_call_id = recent_messages[j].get("tool_call_id")
-                        if tool_call_id:
-                            processed_tool_ids.add(tool_call_id)
-                    elif recent_messages[j]["role"] == "assistant":
-                        # Stop when we hit another assistant message
-                        break
-
-        # Add messages, skipping tool results that have been processed
+        # First pass: collect all tool_call_ids from assistant messages
         for msg in recent_messages:
-            # Skip tool messages that have already been responded to
+            if msg["role"] == "assistant" and msg.get("tool_calls"):
+                for tool_call in msg["tool_calls"]:
+                    declared_tool_call_ids.add(tool_call["id"])
+
+        # Second pass: add messages, skipping orphaned tool results
+        for msg in recent_messages:
+            # Skip tool messages that don't have a corresponding assistant tool_call
             if msg["role"] == "tool":
                 tool_call_id = msg.get("tool_call_id")
-                if tool_call_id and tool_call_id in processed_tool_ids:
-                    continue
+                if tool_call_id and tool_call_id not in declared_tool_call_ids:
+                    continue  # Skip orphaned tool message
             messages.append(msg)
 
         # Get tool definitions
@@ -571,7 +559,7 @@ class Agent:
         # Check if model supports tool calling
         if tools and not self.provider.supports_tools(self.current_model):
             warning_msg = (
-                f"⚠️  Warning: Model '{self.current_model}' does not support tool calling. "
+                f"Warning: Model '{self.current_model}' does not support tool calling. "
                 f"Tools will be disabled for this conversation. "
                 f"Consider switching to a model that supports tools."
             )
@@ -588,9 +576,10 @@ class Agent:
             total_chars=total_msg_length
         )
 
-        # Call LLM
-        max_iterations = 25
-        iteration = 0
+        # Agentic loop: Turn = one LLM call + all tool executions
+        # Following OpenAI Agents SDK, Claude Code, and LangChain patterns
+        max_turns = 20  # Industry standard: 15-20 turns for most tasks
+        turn = 0
         rate_limit_retries = 0  # Track 429-specific retries
         MAX_RATE_LIMIT_RETRIES = 5  # Max retries for rate limit errors
 
@@ -599,9 +588,9 @@ class Agent:
         recent_tool_results = []  # Track results to show user what failed
         MAX_IDENTICAL_CALLS = 3  # Terminate if same tool call repeats 3 times
 
-        while iteration < max_iterations:
-            iteration += 1
-            self.session_logger.log_iteration(iteration, max_iterations)
+        while turn < max_turns:
+            turn += 1
+            self.session_logger.log_iteration(turn, max_turns)
 
             try:
                 response = await self.provider.chat(
@@ -624,7 +613,7 @@ class Agent:
 
                     # Check if exceeded max retries
                     if rate_limit_retries > MAX_RATE_LIMIT_RETRIES:
-                        error_msg = f"❌ Rate limit exceeded after {MAX_RATE_LIMIT_RETRIES} retries. Please try again later."
+                        error_msg = f"X Rate limit exceeded after {MAX_RATE_LIMIT_RETRIES} retries. Please try again later."
                         self.session_logger.log_error(error_msg)
                         return error_msg
 
@@ -660,13 +649,13 @@ class Agent:
                         await asyncio.sleep(total_wait)
                         continue  # Retry the same iteration
 
-                error_msg = f"❌ API Error: {error_str}"
+                error_msg = f"X API Error: {error_str}"
                 self.session_logger.log_error(error_msg)
                 return error_msg
 
             # Check if response has choices
             if not response.get("choices") or len(response["choices"]) == 0:
-                error_msg = f"❌ Invalid API response: No choices returned\nFull response: {response}"
+                error_msg = f"X Invalid API response: No choices returned\nFull response: {response}"
                 self.session_logger.log_error(error_msg)
                 return error_msg
 
@@ -720,7 +709,7 @@ class Agent:
             if not message.get("tool_calls"):
                 content = message.get("content")
                 if content is None or content == "":
-                    error_msg = f"⚠️ Model returned empty response (finish_reason: {choice['finish_reason']})"
+                    error_msg = f"Model returned empty response (finish_reason: {choice['finish_reason']})"
                     self.session_logger.log_error(error_msg)
                     return f"{error_msg}\nThis may indicate the model refused to respond or encountered an error."
 
@@ -759,7 +748,7 @@ class Agent:
                             last_result = last_result[:200] + "..."
 
                         error_msg = (
-                            f"❌ Repetitive loop detected: Same tool call repeated {MAX_IDENTICAL_CALLS} times.\n\n"
+                            f"Repetitive loop detected: Same tool call repeated {MAX_IDENTICAL_CALLS} times.\n\n"
                             f"**Tool**: {function['name']}\n\n"
                             f"**What the agent tried**:\n{function['arguments']}\n\n"
                             f"**Error that kept occurring**:\n{last_result}\n\n"
@@ -832,7 +821,7 @@ class Agent:
                 # End batching - send all accumulated edits
                 await self.tools.end_batch()
 
-        error_msg = "Max iterations reached"
+        error_msg = f"Max turns reached ({max_turns} turns). The task may be too complex or require human intervention."
         self.session_logger.log_error(error_msg)
         return error_msg
     

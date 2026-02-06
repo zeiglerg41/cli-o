@@ -97,9 +97,9 @@ class AutocompleteOverlay(Container):
         from rich.text import Text
 
         options = [
-            Option(Text("✓ Yes - Approve this operation", style="green"), id="y"),
-            Option(Text("✗ No - Deny this operation", style="red"), id="n"),
-            Option(Text("⚡ Always - Auto-approve for this session", style="cyan bold"), id="a"),
+            Option(Text("Yes - Approve this operation", style="green"), id="y"),
+            Option(Text("No - Deny this operation", style="red"), id="n"),
+            Option(Text("Always - Auto-approve for this session", style="cyan bold"), id="a"),
         ]
 
         option_list = self.query_one("#autocomplete-options", OptionList)

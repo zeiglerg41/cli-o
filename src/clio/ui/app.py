@@ -190,7 +190,7 @@ class GenericSelectScreen(ModalScreen):
     }
     """
 
-    def __init__(self, title: str, options: List[tuple], help_text: str = "↑/↓ to navigate • Enter to select • Esc/q to cancel"):
+    def __init__(self, title: str, options: List[tuple], help_text: str = "Up/Down to navigate • Enter to select • Esc/q to cancel"): 
         """Initialize generic select screen.
 
         Args:
@@ -279,7 +279,7 @@ class HistorySelectScreen(ModalScreen[int]):
 
     def compose(self) -> ComposeResult:
         with Container(id="history-dialog"):
-            yield Label("📜 Resume Conversation", id="history-title")
+            yield Label("Resume Conversation", id="history-title")
 
             # Build option list
             options = []
@@ -289,7 +289,7 @@ class HistorySelectScreen(ModalScreen[int]):
                 msg_count = conv['message_count']
                 title = conv['title'] or "New conversation"
                 working_dir = Path(conv['working_dir']).name
-                starred = "⭐ " if conv['starred'] else ""
+                starred = "* " if conv['starred'] else ""
 
                 # Truncate title if too long
                 max_title_len = 40
@@ -303,7 +303,7 @@ class HistorySelectScreen(ModalScreen[int]):
                 options.append(Option(option_text, id=str(conv_id)))
 
             yield OptionList(*options, id="history-list")
-            yield Label("↑/↓ to navigate • Enter to select • Esc/q to cancel", id="history-help")
+            yield Label("Up/Down to navigate • Enter to select • Esc/q to cancel", id="history-help")
 
     def on_mount(self) -> None:
         """Set focus to the option list when modal mounts."""
@@ -573,9 +573,8 @@ class ChatApp(App):
         # Get session usage
         session_usage = self.agent.history_db.get_session_usage(self.agent.conversation_id)
         session_tokens = session_usage.get('prompt_tokens', 0) + session_usage.get('completion_tokens', 0)
-        session_cost = session_usage.get('total_cost', 0.0)
 
-        return f"🤖 {model} @ {hostname} | 📂 {cwd_short} | 🔢 {session_tokens:,} tokens | 💵 ${session_cost:.4f}"
+        return f"[bold]Model:[/bold] {model} @ {hostname} | [bold]WD:[/bold] {cwd_short} | [bold]Token Usage:[/bold] {session_tokens:,}"
 
     async def _do_bridge_connect(self) -> None:
         """Async task to connect to IDE bridge."""
@@ -585,7 +584,7 @@ class ChatApp(App):
             if connected:
                 self._ide_bridge_connected = True
                 chat_log = self.query_one("#chat-log", RichLog)
-                chat_log.write("[dim]✓ Connected to IDE - edits will appear in real-time![/dim]")
+                chat_log.write("[dim]Connected to IDE - edits will appear in real-time![/dim]")
         except Exception as e:
             # Silently fail - IDE bridge is optional
             pass
@@ -656,7 +655,7 @@ You can also use `@filename` syntax to reference files:
         self.agent.clear_history()
         self.conversation_history.clear()
         self.last_assistant_response = ""
-        return "✓ Cleared conversation history"
+        return "Cleared conversation history"
     
     def _cmd_exit(self, args: str) -> str:
         """Exit application."""
@@ -702,7 +701,7 @@ You can also use `@filename` syntax to reference files:
         # Show modal screen for selection
         selection = await self.push_screen_wait(
             GenericSelectScreen(
-                title="🤖 Select Model",
+                title="Select Model",
                 options=model_options
             )
         )
@@ -713,7 +712,7 @@ You can also use `@filename` syntax to reference files:
 
             # Write directly to chat log like tool executions
             chat_log = self.query_one("#chat-log", RichLog)
-            chat_log.write(f"[dim]✓ Switched to {model} @ {hostname}[/dim]")
+            chat_log.write(f"[dim]Switched to {model} @ {hostname}[/dim]")
 
             # Update status bar
             status_bar = self.query_one("#status-bar", Static)
@@ -749,7 +748,7 @@ You can also use `@filename` syntax to reference files:
                 result_msg = "No changes made to config"
                 msg_style = "dim"
             else:
-                result_msg = f"✓ Config file edited: {config_path}\n\nRestart clio for changes to take effect."
+                result_msg = f"Config file edited: {config_path}\n\nRestart clio for changes to take effect."
                 msg_style = "dim"
 
             # Schedule the message display after suspend() completes
@@ -764,7 +763,7 @@ You can also use `@filename` syntax to reference files:
             self.set_timer(0.01, display_result)
             return ""  # Return empty to skip normal display
         except Exception as e:
-            return f"❌ Failed to open editor: {e}\n\nYou can manually edit: {config_path}"
+            return f"Failed to open editor: {e}\n\nYou can manually edit: {config_path}"
 
     def _cmd_prompt(self, args: str) -> str:
         """Edit system prompt in temporary file."""
@@ -824,7 +823,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 # Update config with new prompt
                 config.preferences.system_prompt = new_prompt
                 self.config_manager.save(config)
-                result_msg = "✓ System prompt updated\n\nRestart clio for changes to take effect."
+                result_msg = "System prompt updated\n\nRestart clio for changes to take effect."
                 msg_style = "dim"
 
             # Schedule the message display after suspend() completes
@@ -838,12 +837,12 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             self.set_timer(0.01, display_result)
             return ""  # Return empty to skip normal display
         except Exception as e:
-            return f"❌ Failed to edit prompt: {e}"
+            return f"Failed to edit prompt: {e}"
 
     def _cmd_copy(self, args: str) -> str:
         """Copy last assistant response to clipboard."""
         if not self.last_assistant_response:
-            return "❌ No assistant response to copy"
+            return "No assistant response to copy"
 
         # Try to find clipboard utility
         clipboard_cmd = None
@@ -856,7 +855,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         elif shutil.which("wl-copy"):  # Wayland
             clipboard_cmd = ["wl-copy"]
         else:
-            return "❌ No clipboard utility found (install xclip, xsel, wl-copy, or pbcopy)"
+            return "No clipboard utility found (install xclip, xsel, wl-copy, or pbcopy)"
 
         try:
             subprocess.run(
@@ -864,14 +863,14 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 input=self.last_assistant_response.encode(),
                 check=True
             )
-            return "✓ Copied last assistant response to clipboard"
+            return "Copied last assistant response to clipboard"
         except subprocess.CalledProcessError as e:
-            return f"❌ Failed to copy to clipboard: {e}"
+            return f"Failed to copy to clipboard: {e}"
 
     def _cmd_export(self, args: str) -> str:
         """Export conversation to markdown file."""
         if not self.conversation_history:
-            return "❌ No conversation to export"
+            return "No conversation to export"
 
         # Generate filename
         if args.strip():
@@ -895,18 +894,18 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                     content = entry["content"]
 
                     if role == "user":
-                        f.write(f"## 👤 You\n\n{content}\n\n")
+                        f.write(f"## You\n\n{content}\n\n")
                     elif role == "assistant":
-                        f.write(f"## 🤖 Assistant\n\n{content}\n\n")
+                        f.write(f"## Assistant\n\n{content}\n\n")
                     elif role == "system":
-                        f.write(f"## ⚙️ System\n\n{content}\n\n")
+                        f.write(f"## System\n\n{content}\n\n")
 
                     f.write("---\n\n")
 
             abs_path = Path(filename).absolute()
-            return f"✓ Exported conversation to: {abs_path}"
+            return f"Exported conversation to: {abs_path}"
         except Exception as e:
-            return f"❌ Failed to export: {e}"
+            return f"Failed to export: {e}"
 
     def _cmd_history(self, args: str) -> str:
         """List recent conversations with interactive selection."""
@@ -942,9 +941,9 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         db.close()
 
         if deleted:
-            return f"✓ Deleted {deleted} old conversation(s)"
+            return f"Deleted {deleted} old conversation(s)"
         else:
-            return "✓ No old conversations to delete"
+            return "No old conversations to delete"
 
     async def _cmd_usage(self, args: str) -> str:
         """Show token usage statistics."""
@@ -1149,7 +1148,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 colors = self._cached_colors
                 self._write_message(
                     f"[bold cyan]Resuming Conversation #{self.conversation_id}[/bold cyan]\n\n"
-                    f"📝 Session log: [dim]{log_path}[/dim]\n\n"
+                    f"Session log: [dim]{log_path}[/dim]\n\n"
                     f"[dim]Loaded {len(messages)} previous messages[/dim]",
                     title=colors["system_title"].replace("System", "Welcome Back"),
                     border_style=colors["system_color"],
@@ -1170,9 +1169,9 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                     elif role == "tool":
                         # Show tool results in dim (truncate long results)
                         if len(content) > 200:
-                            chat_log.write(f"[dim]🔧 {content[:200]}...[/dim]")
+                            chat_log.write(f"[dim]Tool: {content[:200]}...[/dim]")
                         else:
-                            chat_log.write(f"[dim]🔧 {content}[/dim]")
+                            chat_log.write(f"[dim]Tool: {content}[/dim]")
 
                     # Add to conversation history for /export etc
                     self.conversation_history.append({"role": role, "content": content})
@@ -1184,7 +1183,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             self._write_message(
                 "[bold cyan]CLIO[/bold cyan] - Command Line Interactive Operator\n\n"
                 "A self-hosted AI coding assistant.\n\n"
-                f"📝 Session log: [dim]{log_path}[/dim]\n\n"
+                f"Session log: [dim]{log_path}[/dim]\n\n"
                 "Type [bold]/help[/bold] for commands or start chatting!",
                 title=colors["system_title"].replace("System", "Welcome"),
                 border_style=colors["system_color"],
@@ -1273,7 +1272,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             self.current_query_worker.cancel()
 
             chat_log = self.query_one("#chat-log", RichLog)
-            chat_log.write("[dim]⚠️ Query cancelled by user[/dim]")
+            chat_log.write("[dim]Query cancelled by user[/dim]")
             self._reset_escape_state()
             return
 
@@ -1412,7 +1411,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
 
             # Handle Escape - deny and close
             if event.key == "escape":
-                chat_log.write(Text("✗ Denied (cancelled)", style="red"))
+                chat_log.write(Text("Denied (cancelled)", style="red"))
                 self.pending_permission.set_result(False)
                 event.prevent_default()
                 event.stop()
@@ -1432,18 +1431,18 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
                 selection = autocomplete.get_selected_completion()
 
                 if selection == 'y':
-                    chat_log.write(Text("✓ Approved", style="green"))
+                    chat_log.write(Text("Approved", style="green"))
                     self.pending_permission.set_result(True)
                 elif selection == 'n':
-                    chat_log.write(Text("✗ Denied", style="red"))
+                    chat_log.write(Text("Denied", style="red"))
                     self.pending_permission.set_result(False)
                 elif selection == 'a':
-                    chat_log.write(Text("✓ Always approve (session)", style="green bold"))
+                    chat_log.write(Text("Always approve (session)", style="green bold"))
                     self.auto_approve_session = True
                     self.pending_permission.set_result(True)
                 else:
                     # No valid selection - deny by default
-                    chat_log.write(Text("✗ Denied (no selection)", style="red"))
+                    chat_log.write(Text("Denied (no selection)", style="red"))
                     self.pending_permission.set_result(False)
 
                 event.prevent_default()
@@ -1689,7 +1688,7 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
 
         # Build prompt message
         prompt_text = Text()
-        prompt_text.append("⚠️  ", style="bold yellow")
+        prompt_text.append("Warning: ", style="bold yellow")
         prompt_text.append(f"{operation}: ", style="bold")
         prompt_text.append(details, style="dim")
         prompt_text.append("\n\n")
@@ -1735,11 +1734,11 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             return result
         except asyncio.TimeoutError:
             # User didn't respond in time - default to deny
-            chat_log.write(Text("✗ Permission timeout (denied by default)", style="red"))
+            chat_log.write(Text("Permission timeout (denied by default)", style="red"))
             return False
         except asyncio.CancelledError:
             # User cancelled (closed app, etc) - default to deny
-            chat_log.write(Text("✗ Permission cancelled (denied by default)", style="red"))
+            chat_log.write(Text("Permission cancelled (denied by default)", style="red"))
             return False
         finally:
             self.pending_permission = None
@@ -1828,8 +1827,8 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
             # Show error
             error = event.worker.error
             tb = traceback.format_exc()
-            error_msg = f"**Error:**\n```\n{str(error)}\n\n{tb}\n```"
-            self._write_message(Markdown(error_msg), title="[bold red]Error[/bold red]", border_style="red", align="center")
+            error_msg = f"**X Error:**\n```\n{str(error)}\n\n{tb}\n```"
+            self._write_message(Markdown(error_msg), title="[bold red]X Error[/bold red]", border_style="red", align="center")
 
             # Add to history
             self.conversation_history.append({"role": "system", "content": f"Error: {str(error)}"})

@@ -92,7 +92,7 @@ class Tools:
             protected_dirs = ["/etc", "/boot", "/sys", "/proc", "/dev", "/usr/bin", "/usr/sbin", "/bin", "/sbin"]
             for protected in protected_dirs:
                 if str(file_path).startswith(protected):
-                    return f"🚫 BLOCKED: Cannot write to system directory {protected}. This requires manual intervention."
+                    return f"BLOCKED: Cannot write to system directory {protected}. This requires manual intervention."
 
             # Request permission
             operation = "write_file"
@@ -261,7 +261,7 @@ class Tools:
             for pattern in dangerous_patterns:
                 pattern_check = pattern.lower().replace(" ", "")
                 if pattern_check in cmd_lower:
-                    return f"🚫 BLOCKED: Command contains potentially dangerous pattern '{pattern}'. If you need to run this, please do it manually."
+                    return f"BLOCKED: Command contains potentially dangerous pattern '{pattern}'. If you need to run this, please do it manually."
 
             # Request permission
             operation = "execute_bash"

@@ -193,15 +193,21 @@ To add a new provider, use the `add-provider` command or edit the JSON file dire
 - Excludes last 20 messages (already in sliding window)
 - Maintains access to distant context beyond window
 
-**3. Observation Masking** (`core.py:537-566`)
-- Skip tool result messages already processed by LLM
-- Tracks `tool_call_id`s followed by assistant responses
-- Saves tokens on redundant tool outputs
+**3. Tool Message Validation** (`core.py:537-566`)
+- Ensures tool messages properly correspond to each `tool_call_id`
+- Strict validation: Only valid, new tool outputs are sent to the LLM
+- Prevents redundant or out-of-order tool messages from reaching the context (replaces old observation masking)
 
-**4. In-Memory Trimming** (`core.py:730-738`)
-- Trim in-memory message list to last 20 after each iteration
+**4. In-Memory Trimming** (`core.py:715-724`)
+- Trim in-memory message list to last 20 after each turn
 - Full history persisted to SQLite + ChromaDB (async)
 - Prevents memory bloat in long sessions
+
+**5. Turn-Based Execution** (`core.py:579-826`)
+- Turn = one LLM call + all tool executions in that response
+- Max 20 turns per query (following OpenAI SDK / Claude Code patterns)
+- Tool executions within a turn don't count separately
+- Prevents premature timeout on legitimate multi-step tasks
 
 **Flow**:
 ```
