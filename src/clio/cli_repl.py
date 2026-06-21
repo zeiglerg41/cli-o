@@ -11,6 +11,7 @@ are reused unchanged -- only the UI layer is replaced.
 """
 import asyncio
 import os
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -260,12 +261,20 @@ class ClioREPL:
 
     async def run(self):
         self._print_welcome()
+        last_interrupt = 0.0
         with patch_stdout():
             while not self._should_exit:
                 try:
                     user_input = await self.session.prompt_async("clio › ")
                 except KeyboardInterrupt:
-                    # Ctrl+C cancels the current line, it does NOT exit (REPL convention)
+                    # Double Ctrl+C within 2s exits; a single one just cancels the line.
+                    # (Ctrl+Q is reserved by the Cursor/VS Code terminal, so we don't use it.)
+                    now = time.monotonic()
+                    if now - last_interrupt < 2.0:
+                        self.console.print("[dim]Goodbye.[/dim]")
+                        break
+                    last_interrupt = now
+                    self.console.print("[dim](press Ctrl+C again within 2s to exit)[/dim]")
                     continue
                 except EOFError:
                     # Ctrl+D exits cleanly
