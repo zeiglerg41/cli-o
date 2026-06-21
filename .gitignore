@@ -39,6 +39,7 @@ env/
 htmlcov/
 
 # Project specific
-config/
+# Anchored to repo root so it does NOT match the src/clio/config source package
+/config/
 workspace/
 *.log

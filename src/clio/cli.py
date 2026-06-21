@@ -100,7 +100,7 @@ def main(ctx, show_history, do_cleanup, continue_flag):
     # Handle --continue flag
     if continue_flag:
         from simple_term_menu import TerminalMenu
-        from .ui.app import ChatApp
+        from .cli_repl import run_repl
         import shutil
 
         db = HistoryDatabase()
@@ -169,29 +169,14 @@ def main(ctx, show_history, do_cleanup, continue_flag):
         selected_menu_text = menu_items[menu_entry_index]
         continue_id = conv_map[selected_menu_text]
 
-        # Start app with conversation ID
-        app = ChatApp(launch_dir=_LAUNCH_CWD, conversation_id=continue_id)
-        app.run()
+        # Resume the line-based REPL with the selected conversation
+        run_repl(launch_dir=_LAUNCH_CWD, conversation_id=continue_id)
         return
 
     if ctx.invoked_subcommand is None:
-        # Run interactive mode
-        from .ui.app import ChatApp
-
-        # Loop to handle /history restarts
-        conversation_id = None
-        while True:
-            app = ChatApp(launch_dir=_LAUNCH_CWD, conversation_id=conversation_id)
-            app.run()
-
-            # Check if user selected a conversation from /history
-            if app.selected_conversation_id:
-                conversation_id = app.selected_conversation_id
-                # Restart with the selected conversation
-                continue
-            else:
-                # Normal exit
-                break
+        # Run interactive mode (line-based CLI - native terminal selection/copy)
+        from .cli_repl import run_repl
+        run_repl(launch_dir=_LAUNCH_CWD)
 
 
 @main.command()

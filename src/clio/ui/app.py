@@ -31,6 +31,22 @@ from ..history.database import HistoryDatabase
 from .textarea_autocomplete import AutocompleteOverlay
 
 
+class SelectableRichLog(RichLog):
+    """RichLog with working click-drag text selection and Ctrl+C copy.
+
+    Stock RichLog renders content as many Strip lines, so Textual's inherited
+    get_selection (which only handles a single Text/Content render) returns
+    None -- the selection highlights but nothing can be copied. We extract the
+    plain text from the rendered line strips so Textual's native copy works.
+    """
+
+    def get_selection(self, selection):
+        if not self.lines:
+            return None
+        text = "\n".join(strip.text for strip in self.lines)
+        return selection.extract(text), "\n"
+
+
 class AutocompleteTextArea(TextArea):
     """Custom TextArea that allows parent to handle Tab/Enter for autocomplete."""
 
@@ -435,14 +451,9 @@ class ChatApp(App):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear", "Clear", show=True),
-        Binding("f2", "toggle_mouse", "Toggle Mouse", show=False),
     ]
 
-    # Enable terminal text selection by not capturing mouse events
-    # Users can hold Shift and select text with the mouse
-    # Or press F2 to toggle mouse mode on/off
     ENABLE_COMMAND_PALETTE = False
     
     def __init__(self, launch_dir: Optional[str] = None, conversation_id: Optional[int] = None):
@@ -525,7 +536,7 @@ class ChatApp(App):
         yield Static(self._get_status_text(), id="status-bar")
 
         # Chat log with low min_width to allow dynamic resizing
-        yield RichLog(id="chat-log", wrap=True, markup=True, min_width=10)
+        yield SelectableRichLog(id="chat-log", wrap=True, markup=True, min_width=10)
 
         # Thinking indicator (hidden by default, shown during processing)
         yield Static("", id="thinking-indicator", classes="hidden")
@@ -633,8 +644,8 @@ You can also use `@filename` syntax to reference files:
 - `@"path with spaces.txt"` - Use quotes for paths with spaces
 
 **Text Selection:**
-- Hold **Shift** and drag with mouse to select text
-- Then use Ctrl+Shift+C (or Cmd+C on Mac) to copy
+- Click and drag to select text, then **Ctrl+C** to copy
+- **Ctrl+C** no longer quits -- press **Ctrl+Q** to exit
 
 **Accessibility:**
 - Enable colorblind mode in `~/.clio/config.json`:
@@ -1874,31 +1885,3 @@ Available tools: edit_file, read_file, write_file, execute_bash, grep_files, fin
         chat_log.clear()
         self.display_messages.clear()  # Also clear stored messages
         self.agent.clear_history()
-
-    def action_toggle_mouse(self) -> None:
-        """Toggle mouse support for easier text selection."""
-        from textual.drivers.linux_driver import LinuxDriver
-        driver = self.app._driver
-
-        # Toggle mouse reporting
-        if hasattr(driver, 'mouse_enabled'):
-            driver.mouse_enabled = not driver.mouse_enabled
-            status = "enabled" if driver.mouse_enabled else "disabled"
-        else:
-            # Fallback: Try to toggle via terminal codes
-            import sys
-            if self.mouse_over:
-                # Disable mouse reporting
-                sys.stdout.write('\033[?1000l')  # Disable mouse tracking
-                sys.stdout.flush()
-                self.mouse_over = False
-                status = "disabled"
-            else:
-                # Enable mouse reporting
-                sys.stdout.write('\033[?1000h')  # Enable mouse tracking
-                sys.stdout.flush()
-                self.mouse_over = True
-                status = "enabled"
-
-        chat_log = self.query_one("#chat-log", RichLog)
-        chat_log.write(f"[dim]Mouse {status} - Press F2 to toggle. Hold Shift to select text.[/dim]")
