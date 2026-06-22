@@ -126,14 +126,21 @@ class ContextRetriever:
                 if not success:
                     return False
 
-            # Generate embedding (model is now loaded)
-            embedding = self.embedding_manager.embed_text(content)
+            # Generate embedding + write to the vector store OFF the event loop.
+            # model.encode() and the ChromaDB write are synchronous CPU work; run
+            # on the loop they freeze the UI spinner mid-response.
+            loop = asyncio.get_event_loop()
+            embedding = await loop.run_in_executor(
+                None, self.embedding_manager.embed_text, content
+            )
             if embedding is None:
                 logger.warning(f"Failed to generate embedding for message {message_id}")
                 return needs_loading
 
-            # Add to collection
-            self._add_to_collection(conversation_id, message_id, role, content, embedding)
+            await loop.run_in_executor(
+                None, self._add_to_collection,
+                conversation_id, message_id, role, content, embedding,
+            )
             return needs_loading
 
         except Exception as e:

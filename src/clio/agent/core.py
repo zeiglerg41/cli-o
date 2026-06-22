@@ -84,17 +84,22 @@ class Agent:
         config_manager: ConfigManager,
         permission_callback: Optional[Callable[[str, str, Optional[dict]], Awaitable[bool]]] = None,
         tool_callback: Optional[Callable[[str, Dict[str, Any], str], Awaitable[None]]] = None,
-        conversation_id: Optional[int] = None
+        conversation_id: Optional[int] = None,
+        token_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         """Initialize agent.
 
         Args:
             conversation_id: If provided, resume from this conversation ID
+            token_callback: If set, the assistant's text is streamed to it token
+                by token (and the provider streams instead of waiting for the
+                full response).
         """
         self.config_manager = config_manager
         self.tools = Tools(permission_callback)
         self.messages: List[Message] = []
         self.tool_callback = tool_callback
+        self.token_callback = token_callback
 
         # Initialize session logger
         self.session_logger = SessionLogger()
@@ -593,11 +598,19 @@ class Agent:
             self.session_logger.log_iteration(turn, max_turns)
 
             try:
-                response = await self.provider.chat(
-                    messages=messages,
-                    model=self.current_model,
-                    tools=tools
-                )
+                if self.token_callback is not None and hasattr(self.provider, "chat_streaming"):
+                    response = await self.provider.chat_streaming(
+                        messages=messages,
+                        model=self.current_model,
+                        tools=tools,
+                        token_callback=self.token_callback,
+                    )
+                else:
+                    response = await self.provider.chat(
+                        messages=messages,
+                        model=self.current_model,
+                        tools=tools
+                    )
                 # Reset retry counter on successful request
                 rate_limit_retries = 0
 

@@ -11,23 +11,20 @@ are reused unchanged -- only the UI layer is replaced.
 """
 import asyncio
 import getpass
-import itertools
 import os
-import shutil
+import sys
 import time
 from pathlib import Path
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.patch_stdout import patch_stdout
-from prompt_toolkit.styles import Style
+from prompt_toolkit.cursor_shapes import CursorShape
+from prompt_toolkit.key_binding import KeyBindings
 
 from .agent.core import Agent, strip_thinking_tags
 from .config.manager import ConfigManager
@@ -90,12 +87,8 @@ class ClioREPL:
             self.username = getpass.getuser()
         except Exception:
             self.username = "you"
-        # Concurrent input/processing state (input box stays live while the
-        # agent works; messages typed mid-response are queued).
-        self._queue = None              # asyncio.Queue of pending user messages
-        self._busy = False              # True while the agent is processing
-        self._pending_permission = None # Future awaiting a y/n/a answer
-        self._spinner_frames = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+        self._streamed_any = False      # did the current turn stream any tokens?
+        self._status = None             # animated "thinking..." spinner, while waiting
         self.config_manager = ConfigManager()
         self.context_manager = ContextManager(working_dir=launch_dir)
         self.auto_approve_session = False
@@ -105,6 +98,7 @@ class ClioREPL:
             permission_callback=self.request_permission,
             tool_callback=self.on_tool_executed,
             conversation_id=conversation_id,
+            token_callback=self.on_token,
         )
 
         # Slash command registry
@@ -113,20 +107,46 @@ class ClioREPL:
 
         history_path = Path.home() / ".clio" / "repl_history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Ctrl+C clears the input (box shrinks back to one line) when there's
+        # text; on an empty box it aborts so the loop can do double-press exit.
+        kb = KeyBindings()
+
+        @kb.add("c-c")
+        def _(event):
+            buf = event.current_buffer
+            if buf.text:
+                buf.text = ""
+                event.app.renderer.erase()
+            else:
+                event.app.exit(exception=KeyboardInterrupt())
+
+        # Re-trigger autocomplete after deleting a character (backspace/delete),
+        # so suggestions keep narrowing instead of vanishing until you retype.
+        def _recomplete(buf):
+            if buf.text and not buf.complete_state:
+                buf.start_completion(select_first=False)
+
+        @kb.add("backspace")
+        def _(event):
+            buf = event.current_buffer
+            buf.delete_before_cursor(count=event.arg)
+            _recomplete(buf)
+
+        @kb.add("delete")
+        def _(event):
+            buf = event.current_buffer
+            buf.delete(count=event.arg)
+            _recomplete(buf)
+
         self.session = PromptSession(
             history=FileHistory(str(history_path)),
             completer=ClioCompleter(list(self.router.commands.keys())),
             complete_while_typing=True,
-            # reserve_space_for_menu=0 removes the ~8 rows prompt_toolkit reserves
-            # under the input (that padding was making the box look tall). The
-            # bottom line comes from bottom_toolbar, which keeps a row reserved
-            # on-screen so the box's bottom border is never cut off at the edge.
-            reserve_space_for_menu=0,
-            style=Style.from_dict({"bottom-toolbar": "noreverse"}),
-            # On submit, erase the whole input box (lines + arrow + text). We
-            # then echo the message into the transcript and render the agent's
-            # work above a fresh, empty input box -- so the box stays at the
-            # bottom and nothing renders "inside" it.
+            key_bindings=kb,
+            # Blinking block cursor.
+            cursor=CursorShape.BLINKING_BLOCK,
+            # On submit, erase the input line; we echo it ourselves in the loop.
             erase_when_done=True,
         )
         self._should_exit = False
@@ -174,9 +194,8 @@ class ClioREPL:
     async def request_permission(self, operation: str, details: str, diff_info: dict = None) -> bool:
         """Ask the user to approve a tool action. Returns True to allow.
 
-        We don't open a second prompt (that would clash with the always-live
-        input box). Instead we print the request and await a Future that the
-        input loop resolves with whatever the user types next (y / n / a).
+        No prompt is on screen while the agent runs (sequential loop), so we can
+        ask directly with a small y/n/a prompt.
         """
         if self.auto_approve_session or self.config_manager.load().preferences.auto_approve:
             return True
@@ -188,30 +207,53 @@ class ClioREPL:
             self._render_diff(diff_info.get("old", ""), diff_info.get("new", ""), filename)
         self.console.print(Panel(
             Text(details, style="yellow"),
-            title=f"[bold]Permission: {operation}[/bold]  —  answer below: y / n / a",
+            title=f"[bold]Permission: {operation}[/bold]",
             border_style="yellow",
             expand=False,
         ))
-        loop = asyncio.get_event_loop()
-        self._pending_permission = loop.create_future()
         try:
-            answer = await self._pending_permission
-        except asyncio.CancelledError:
+            answer = await self.session.prompt_async("  Allow? [y]es / [n]o / [a]lways: ")
+        except (EOFError, KeyboardInterrupt):
             answer = ""
-        finally:
-            self._pending_permission = None
         answer = (answer or "").strip().lower()
         if answer in ("a", "always"):
             self.auto_approve_session = True
+            self.console.print("[bold green]✓ approved[/bold green] [dim](auto-approving for this session)[/dim]")
             return True
-        return answer in ("y", "yes")
+        allowed = answer in ("y", "yes")
+        if allowed:
+            self.console.print("[bold green]✓ approved[/bold green]")
+        else:
+            self.console.print("[bold red]✗ denied[/bold red] [dim](command not run)[/dim]")
+        return allowed
 
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
-        """Print a compact line when the agent runs a tool."""
+        """Print a compact line when the agent runs a tool (or is blocked)."""
         arg_preview = ", ".join(f"{k}={v}" for k, v in list(arguments.items())[:3])
         if len(arg_preview) > 100:
             arg_preview = arg_preview[:100] + "..."
-        self.console.print(f"[dim cyan]→ {tool_name}[/dim cyan] [dim]({arg_preview})[/dim]")
+        # Stop the spinner while we print the tool line, then resume it so it
+        # keeps spinning during the next turn's wait (until the response streams).
+        if self._status is not None:
+            self._status.stop()
+        res = (result or "").strip().lower()
+        if res.startswith("permission denied") or res.startswith("blocked"):
+            self.console.print(f"[red]✗ {tool_name}[/red] [dim]({arg_preview}) — not run[/dim]")
+        else:
+            self.console.print(f"[dim cyan]→ {tool_name}[/dim cyan] [dim]({arg_preview})[/dim]")
+        if self._status is not None and not self._streamed_any:
+            self._status.start()
+
+    async def on_token(self, token: str) -> None:
+        """Stream the assistant's text live (Claude-style). The first token of a
+        turn stops the spinner and prints the green 'clio ›' prefix."""
+        if self._status is not None:
+            self._status.stop()  # response is streaming; hide the spinner
+        if not self._streamed_any:
+            self._streamed_any = True
+            sys.stdout.write("\033[1;32mclio › \033[0m")
+        sys.stdout.write(token)
+        sys.stdout.flush()
 
     # ----- slash command handlers -----------------------------------------
 
@@ -299,12 +341,6 @@ class ClioREPL:
         if not user_input:
             return
 
-        # Echo the submitted message into the transcript (the input box itself
-        # was erased on submit). Rendered as Text so '[' isn't treated as markup.
-        self.console.print(
-            Text.assemble((f"{self.username} › ", "bold cyan"), (user_input, ""))
-        )
-
         command, cmd_args, _ = self.router.parse(user_input)
         if command is not None:
             result = await self.router.execute(command, cmd_args)
@@ -322,18 +358,32 @@ class ClioREPL:
         context = self.context_manager.format_context()
 
         self.console.print()
-        # No rich spinner here: the "working..." indicator lives in the input
-        # box's bottom toolbar (see run()), so the input stays usable meanwhile.
-        response = await self.agent.chat(user_input, context=context)
-
+        # Animated "thinking..." spinner (same as the warm-up message) while we
+        # wait. It's stopped the instant any output appears (first streamed token
+        # or first tool call), so it sits just above clio's output / tool calls.
+        self._streamed_any = False
+        self._status = self.console.status("[dim]thinking…[/dim]", spinner="dots")
+        self._status.start()
+        try:
+            response = await self.agent.chat(user_input, context=context)
+        finally:
+            if self._status is not None:
+                self._status.stop()
+                self._status = None
         response = strip_thinking_tags(response or "")
-        # Label clio's turn with a "clio ›" prefix (the user's turn shows as "›").
-        self.console.print("[bold green]clio ›[/bold green]", end=" ")
-        if response.strip():
-            self.console.print(Markdown(response))
-        else:
+
+        if self._streamed_any:
+            # Already printed token-by-token; just finish the line.
+            sys.stdout.write("\n")
+            sys.stdout.flush()
             self.console.print()
-        self.console.print()
+        elif not response.strip():
+            self.console.print("[bold green]clio ›[/bold green]")
+            self.console.print()
+        else:
+            # Fallback (provider didn't stream): render as one atomic print.
+            self.console.print(Text.assemble(("clio › ", "bold green"), (response, "")))
+            self.console.print()
 
     async def _preload_embeddings(self):
         """Warm the RAG embedding model at startup, with a visible spinner.
@@ -377,86 +427,51 @@ class ClioREPL:
             os.close(saved_fd)
             os.close(devnull_fd)
 
-    def _bottom_toolbar(self):
-        """Bottom line of the input box; doubles as a live status indicator."""
-        width = shutil.get_terminal_size((80, 24)).columns
-        if self._pending_permission is not None and not self._pending_permission.done():
-            return ANSI("\033[33m  awaiting permission — type  y  /  n  /  a\033[0m")
-        if self._busy:
-            frame = next(self._spinner_frames)
-            queued = self._queue.qsize() if self._queue else 0
-            extra = f"   ({queued} queued)" if queued else ""
-            return ANSI(f"\033[2m{frame} working...{extra}\033[0m")
-        return ANSI("\033[2m" + "─" * width + "\033[0m")
+        # Warm tiktoken too: its first get_encoding() loads BPE merges (~0.5s),
+        # which otherwise blocks the event loop on the first message and stutters
+        # the spinner. Done in an executor so startup stays responsive.
+        try:
+            def _warm_tiktoken():
+                import tiktoken
+                tiktoken.get_encoding("cl100k_base").encode("warm up")
+            await loop.run_in_executor(None, _warm_tiktoken)
+        except Exception:
+            pass
 
     async def run(self):
-        # patch_stdout(raw=True) keeps the input box pinned at the bottom while
-        # rich output streams above it, in the normal screen buffer (so native
-        # copy/scrollback still work). raw=True passes rich's ANSI through
-        # un-mangled. Two coroutines run concurrently: one always shows the input
-        # box (so you can type/queue while the agent works), the other processes
-        # the queue one message at a time.
+        # Sequential loop: show the prompt, read a line, then process it while
+        # NO prompt is on screen -- so the agent's response can stream cleanly to
+        # the terminal (token by token) without a pinned prompt overwriting the
+        # partial lines (which patch_stdout cannot avoid). Native copy/scrollback
+        # are preserved since we never use the alternate screen.
         self._print_welcome()
         await self._preload_embeddings()
-        self._queue = asyncio.Queue()
-
-        async def input_loop():
-            last_interrupt = 0.0
-            while not self._should_exit:
-                width = shutil.get_terminal_size((80, 24)).columns
-                try:
-                    text = await self.session.prompt_async(
-                        ANSI("\033[2m" + "─" * width + "\033[0m\n› "),
-                        bottom_toolbar=self._bottom_toolbar,
-                        refresh_interval=0.1,  # animate the working... spinner
-                    )
-                except KeyboardInterrupt:
-                    now = time.monotonic()
-                    if now - last_interrupt < 2.0:
-                        self._should_exit = True
-                        self.console.print("[dim]Goodbye.[/dim]")
-                        break
-                    last_interrupt = now
-                    self.console.print("[dim](press Ctrl+C again within 2s to exit)[/dim]")
-                    continue
-                except EOFError:
-                    self._should_exit = True
+        last_interrupt = 0.0
+        while not self._should_exit:
+            try:
+                text = await self.session.prompt_async("› ")
+            except KeyboardInterrupt:
+                now = time.monotonic()
+                if now - last_interrupt < 2.0:
                     self.console.print("[dim]Goodbye.[/dim]")
                     break
-                text = (text or "").strip()
-                if not text:
-                    continue
-                # If a permission request is open, this answer goes to it.
-                if self._pending_permission is not None and not self._pending_permission.done():
-                    self._pending_permission.set_result(text)
-                    continue
-                # Otherwise queue it for processing (echoed when it runs, so the
-                # transcript stays in order; the toolbar shows the queued count).
-                await self._queue.put(text)
-
-        async def process_loop():
-            while not self._should_exit:
-                try:
-                    text = await asyncio.wait_for(self._queue.get(), timeout=0.2)
-                except asyncio.TimeoutError:
-                    continue
-                self._busy = True
-                try:
-                    await self._handle_input(text)
-                except Exception as e:
-                    self.console.print(f"[red]Error: {e}[/red]")
-                finally:
-                    self._busy = False
-
-        with patch_stdout(raw=True):
-            inp = asyncio.create_task(input_loop())
-            proc = asyncio.create_task(process_loop())
-            await inp
-            proc.cancel()
+                last_interrupt = now
+                self.console.print("[dim](press Ctrl+C again within 2s to exit)[/dim]")
+                continue
+            except EOFError:
+                self.console.print("[dim]Goodbye.[/dim]")
+                break
+            text = (text or "").strip()
+            if not text:
+                continue
+            # Echo the submitted line as the user's turn.
+            self.console.print(
+                Text.assemble((f"{self.username} › ", "bold cyan"), (text, ""))
+            )
             try:
-                await proc
-            except asyncio.CancelledError:
-                pass
+                await self._handle_input(text)
+            except Exception as e:
+                self.console.print(f"[red]Error: {e}[/red]")
 
 
 def run_repl(launch_dir: str, conversation_id=None):

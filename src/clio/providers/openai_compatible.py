@@ -322,6 +322,69 @@ class OpenAICompatibleProvider(Provider):
                     ]
                 }
     
+    async def chat_streaming(
+        self,
+        messages: List[Message],
+        model: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        token_callback=None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Like chat(), but streams content tokens to token_callback as they
+        arrive. Returns the same {choices:[{message, finish_reason}]} shape, so
+        the agent's tool loop is unchanged. Tool-call deltas are accumulated and
+        the XML/JSON text fallback is applied at the end.
+        """
+        def _attr(obj, name, default=None):
+            # Works for both OpenAI SDK delta objects and plain dicts.
+            if isinstance(obj, dict):
+                return obj.get(name, default)
+            return getattr(obj, name, default)
+
+        content_parts: List[str] = []
+        tool_acc: Dict[int, Dict[str, Any]] = {}
+        finish_reason = None
+
+        async for chunk in self.stream_chat(messages, model, tools=tools, **kwargs):
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
+            if piece:
+                content_parts.append(piece)
+                if token_callback is not None:
+                    await token_callback(piece)
+            for tc in (delta.get("tool_calls") or []):
+                idx = _attr(tc, "index", 0) or 0
+                slot = tool_acc.setdefault(
+                    idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                )
+                tc_id = _attr(tc, "id")
+                if tc_id:
+                    slot["id"] = tc_id
+                fn = _attr(tc, "function")
+                if fn is not None:
+                    name = _attr(fn, "name")
+                    if name:
+                        slot["function"]["name"] = name
+                    args = _attr(fn, "arguments")
+                    if args:
+                        slot["function"]["arguments"] += args
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+
+        content = "".join(content_parts)
+        structured = [tool_acc[i] for i in sorted(tool_acc)] if tool_acc else None
+        built = self._build_choice(
+            role="assistant",
+            content=content or None,
+            structured_tool_calls=structured,
+            finish_reason=finish_reason or "stop",
+        )
+        return {"id": "stream", "model": model, "choices": [built], "usage": None}
+
     async def list_models(self) -> List[str]:
         """List available models."""
         # Return models from config since not all APIs support listing
