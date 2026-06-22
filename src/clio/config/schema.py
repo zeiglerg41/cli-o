@@ -28,7 +28,15 @@ class Preferences(BaseModel):
     show_thinking: bool = True
 
 
+class Permissions(BaseModel):
+    """User-customizable command-safety lists for execute_bash auto-approval."""
+    extra_readonly_commands: List[str] = []
+    extra_readonly_git_subcommands: List[str] = []
+    extra_blocked_patterns: List[str] = []
+
+
 class Config(BaseModel):
     providers: Dict[str, ProviderConfig] = {}
     defaults: Defaults = Field(default_factory=Defaults)
     preferences: Preferences = Field(default_factory=Preferences)
+    permissions: Permissions = Field(default_factory=Permissions)

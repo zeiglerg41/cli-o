@@ -1,9 +1,40 @@
 """Embedding generation for conversation messages."""
+import os
 import logging
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from pathlib import Path
+
+# Silence Hugging Face / transformers noise before they are imported. Without
+# this, loading the embedding model dumps "Loading weights" progress bars and an
+# "unauthenticated requests to the HF Hub" warning straight into the chat output.
+# Must be set before transformers/sentence_transformers are first imported.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+# The "unauthenticated requests to the HF Hub" warning is printed (from compiled
+# code) whenever the loader makes a network request to check the cached model.
+# If the model is already cached, force offline mode so no request is made at
+# all -- this kills the warning at the source, which is race-proof (no fd/thread
+# timing tricks needed). Only do this when cached, so a fresh machine can still
+# download the model on first run.
+def _embedding_model_is_cached() -> bool:
+    from pathlib import Path
+    hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+    try:
+        return hub.exists() and any(
+            hub.glob("models--sentence-transformers--all-MiniLM-L6-v2")
+        )
+    except OSError:
+        return False
+
+if _embedding_model_is_cached():
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +54,57 @@ class EmbeddingManager:
 
     def _load_model_sync(self):
         """Synchronous model loading (runs in thread pool)."""
-        from sentence_transformers import SentenceTransformer
+        # Quiet the HF hub + transformers loggers/progress bars at the source.
+        # (We can't redirect stdout/stderr here: this runs in a worker thread
+        # while the main thread is printing the chat response, and redirection
+        # is process-global -- it would swallow the real output.)
+        for name in ("huggingface_hub", "transformers", "sentence_transformers"):
+            logging.getLogger(name).setLevel(logging.ERROR)
+        try:
+            from huggingface_hub.utils import disable_progress_bars
+            disable_progress_bars()
+        except Exception:
+            pass
+        try:
+            from transformers.utils import logging as hf_logging
+            hf_logging.set_verbosity_error()
+            hf_logging.disable_progress_bar()
+        except Exception:
+            pass
+
         logger.info(f"Loading embedding model: {self._model_name}")
-        model = SentenceTransformer(self._model_name)
+        import sys
+
+        def _muted_construct():
+            """Build the model with OS-level stderr muted.
+
+            transformers 5.x writes a "Loading weights" bar and an HF-token
+            warning straight to OS fd 2, bypassing Python's sys.stderr, so
+            logging levels can't catch them. We mute fd 2 for the load + warmup.
+            This is a backup; the primary fix below is to avoid the HF network
+            request entirely (offline mode) so there's nothing to print.
+            """
+            try:
+                stderr_fd = sys.stderr.fileno()
+            except (AttributeError, ValueError, OSError):
+                stderr_fd = 2
+            saved_fd = os.dup(stderr_fd)
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull_fd, stderr_fd)
+                from sentence_transformers import SentenceTransformer
+                m = SentenceTransformer(self._model_name)
+                try:
+                    m.encode("warmup", convert_to_numpy=True)
+                except Exception:
+                    pass
+                return m
+            finally:
+                os.dup2(saved_fd, stderr_fd)
+                os.close(saved_fd)
+                os.close(devnull_fd)
+
+        model = _muted_construct()
         logger.info("Embedding model loaded successfully")
         return model
 

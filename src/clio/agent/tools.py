@@ -1,5 +1,6 @@
 """Tools for the AI agent."""
 import asyncio
+import re
 import subprocess
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Optional, Callable, Awaitable, Any
 import aiofiles
 import httpx
 from ..ide_bridge import get_bridge
+from .command_safety import is_readonly_command, is_blocked
 
 
 class Tools:
@@ -94,11 +96,21 @@ class Tools:
                 if str(file_path).startswith(protected):
                     return f"BLOCKED: Cannot write to system directory {protected}. This requires manual intervention."
 
-            # Request permission
+            # Request permission. Pass the existing content (if any) and the new
+            # content so the UI can show a diff preview of what will change.
+            existing = ""
+            if file_path.exists():
+                try:
+                    async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                        existing = await f.read()
+                except Exception:
+                    existing = ""
             operation = "write_file"
-            details = f"Write to {path} ({len(content)} chars)"
+            verb = "Overwrite" if existing else "Create"
+            details = f"{verb} {path} ({len(content)} chars)"
+            diff_info = {"path": str(file_path), "old": existing, "new": content}
 
-            if not await self.request_permission(operation, details):
+            if not await self.request_permission(operation, details, diff_info):
                 return "Permission denied"
 
             # Create parent directories
@@ -240,35 +252,22 @@ class Tools:
     async def execute_bash(self, command: str, timeout: int = 30) -> str:
         """Execute a bash command and return output."""
         try:
-            # Safety check for dangerous commands
-            dangerous_patterns = [
-                "rm -rf /",
-                "rm -rf /*",
-                "rm -rf ~",
-                "rm -rf $HOME",
-                "> /dev/sda",
-                "mkfs.",
-                "dd if=",
-                ":(){ :|:& };:",  # fork bomb
-                "chmod -R 777 /",
-                "/etc/passwd",
-                "/etc/shadow",
-                "curl | bash",
-                "wget | sh",
-            ]
+            # Refuse catastrophic commands outright.
+            blocked = is_blocked(command)
+            if blocked:
+                return f"BLOCKED: Command contains potentially dangerous pattern '{blocked}'. If you need to run this, please do it manually."
 
-            cmd_lower = command.lower().replace(" ", "")
-            for pattern in dangerous_patterns:
-                pattern_check = pattern.lower().replace(" ", "")
-                if pattern_check in cmd_lower:
-                    return f"BLOCKED: Command contains potentially dangerous pattern '{pattern}'. If you need to run this, please do it manually."
-
-            # Request permission
+            # Request permission -- UNLESS the command is a known read-only one.
+            # Local/open-weight models can't be fully trusted to pick safe
+            # commands, so we use a conservative allowlist: auto-run only commands
+            # whose every segment is read-only AND that contain no chaining,
+            # redirects, command substitution, or sudo. Everything else is gated.
             operation = "execute_bash"
             details = f"Run command: {command}"
 
-            if not await self.request_permission(operation, details):
-                return "Permission denied"
+            if not is_readonly_command(command):
+                if not await self.request_permission(operation, details):
+                    return "Permission denied"
 
             # Execute command
             process = await asyncio.create_subprocess_shell(

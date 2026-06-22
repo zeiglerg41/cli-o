@@ -68,12 +68,27 @@ TOOL_SUPPORT_MATRIX: Dict[str, Dict[str, bool]] = {
         "claude-3-haiku-20240307": True,
     },
     "ollama": {
-        # Open source models with tool support
+        # Open source models with tool support.
+        # Keys are matched by prefix, so "qwen3" also matches custom builds
+        # like "qwen3-8b-clio" and tagged variants like "qwen3:8b".
         "llama3.1": True,
-        "llama3.1:8b": True,
-        "llama3.1:70b": True,
-        "llama3.1:405b": True,
+        "llama3.2": True,
+        "llama3.3": True,
+        "llama4": True,
+        # Qwen family (2, 2.5, 3, and QwQ all support tool calling)
+        "qwen2": True,
+        "qwen2.5": True,
+        "qwen2.5-coder": True,
+        "qwen3": True,
+        "qwq": True,
+        # Mistral family (incl. agentic coding/reasoning variants)
+        "mistral": True,
         "mistral-nemo": True,
+        "mistral-small": True,
+        "mixtral": True,
+        "devstral": True,
+        "magistral": True,
+        # Others
         "firefunction-v2": True,
         "command-r-plus": True,
         "command-r": True,
