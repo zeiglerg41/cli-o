@@ -476,8 +476,16 @@ class Agent:
         current_date = datetime.now().strftime("%B %d, %Y")  # e.g., "December 31, 2025"
         system_prompt_with_date = f"{self.system_prompt}\n\nCurrent date: {current_date}"
 
-        # Add working directory context if resuming a conversation
-        if self.original_working_dir and os.getcwd() != self.original_working_dir:
+        # Always tell the model where it is running, so it uses "." / the actual
+        # path instead of guessing (e.g. inventing "~/RTS" while already inside it).
+        cwd = os.getcwd()
+        system_prompt_with_date += (
+            f"\n\nCurrent working directory: {cwd}"
+            "\nWhen the user refers to \"this\"/\"the current\" directory or a project "
+            "by its folder name, operate on this directory (use \".\") rather than "
+            "constructing a path from the home directory."
+        )
+        if self.original_working_dir and cwd != self.original_working_dir:
             system_prompt_with_date += f"\n\nNote: This conversation was originally started in: {self.original_working_dir}"
 
         # Add recently edited files context if resuming

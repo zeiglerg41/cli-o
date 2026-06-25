@@ -11,6 +11,16 @@ from ..ide_bridge import get_bridge
 from .command_safety import is_readonly_command, is_blocked
 
 
+def _resolve_path(path: str) -> Path:
+    """Resolve a model/user-supplied path robustly.
+
+    Strips stray surrounding whitespace and expands a leading ``~`` (which
+    ``Path.resolve()`` alone does NOT do) before resolving. A relative path or
+    "." resolves against the current working directory, where clio was launched.
+    """
+    return Path(str(path).strip()).expanduser().resolve()
+
+
 class Tools:
     """Collection of tools for the agent."""
 
@@ -71,7 +81,7 @@ class Tools:
     async def read_file(self, path: str) -> str:
         """Read a file and return its contents."""
         try:
-            file_path = Path(path).resolve()
+            file_path = _resolve_path(path)
             
             if not file_path.exists():
                 return f"Error: File not found: {path}"
@@ -88,7 +98,7 @@ class Tools:
     async def write_file(self, path: str, content: str) -> str:
         """Write content to a file."""
         try:
-            file_path = Path(path).resolve()
+            file_path = _resolve_path(path)
 
             # Safety check - block writes to system directories
             protected_dirs = ["/etc", "/boot", "/sys", "/proc", "/dev", "/usr/bin", "/usr/sbin", "/bin", "/sbin"]
@@ -177,7 +187,7 @@ class Tools:
             if bridge.is_connected():
                 # First apply the edit to the file
                 new_content = content.replace(old_text, new_text, 1)
-                file_path = Path(path).resolve()
+                file_path = _resolve_path(path)
                 file_path_str = str(file_path)
                 async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                     await f.write(new_content)
@@ -240,7 +250,7 @@ class Tools:
             new_content = content.replace(old_text, new_text, 1)
 
             # Write back - but skip the unicode_escape decode since we already did it above
-            file_path = Path(path).resolve()
+            file_path = _resolve_path(path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                 await f.write(new_content)
@@ -304,7 +314,7 @@ class Tools:
     async def list_directory(self, path: str = ".") -> str:
         """List contents of a directory."""
         try:
-            dir_path = Path(path).resolve()
+            dir_path = _resolve_path(path)
 
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"

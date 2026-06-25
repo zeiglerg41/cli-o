@@ -89,6 +89,9 @@ class ClioREPL:
             self.username = "you"
         self._streamed_any = False      # did the current turn stream any tokens?
         self._status = None             # animated "thinking..." spinner, while waiting
+        self._t_start = None            # perf_counter when the current turn's request began
+        self._t_first_token = None      # perf_counter when the first token arrived
+        self._token_count = 0           # streamed chunks this turn (≈ tokens for Ollama)
         self.config_manager = ConfigManager()
         self.context_manager = ContextManager(working_dir=launch_dir)
         self.auto_approve_session = False
@@ -200,6 +203,14 @@ class ClioREPL:
         if self.auto_approve_session or self.config_manager.load().preferences.auto_approve:
             return True
 
+        # The thinking spinner is a rich Live display that holds the terminal; if
+        # it keeps running, prompt_toolkit's y/n/a prompt can't render and this
+        # call hangs (the spinner just spins forever). Stop it while we ask, then
+        # resume it afterward for the tool-execution wait.
+        spinner_was_running = self._status is not None
+        if spinner_was_running:
+            self._status.stop()
+
         self.console.print()
         # Show a diff preview of the change when we have the data.
         if diff_info and "new" in diff_info:
@@ -219,12 +230,17 @@ class ClioREPL:
         if answer in ("a", "always"):
             self.auto_approve_session = True
             self.console.print("[bold green]✓ approved[/bold green] [dim](auto-approving for this session)[/dim]")
-            return True
-        allowed = answer in ("y", "yes")
-        if allowed:
-            self.console.print("[bold green]✓ approved[/bold green]")
+            allowed = True
         else:
-            self.console.print("[bold red]✗ denied[/bold red] [dim](command not run)[/dim]")
+            allowed = answer in ("y", "yes")
+            if allowed:
+                self.console.print("[bold green]✓ approved[/bold green]")
+            else:
+                self.console.print("[bold red]✗ denied[/bold red] [dim](command not run)[/dim]")
+
+        # Resume the spinner for the tool-execution / next model wait.
+        if spinner_was_running and not self._streamed_any:
+            self._status.start()
         return allowed
 
     async def on_tool_executed(self, tool_name: str, arguments: dict, result: str) -> None:
@@ -251,9 +267,36 @@ class ClioREPL:
             self._status.stop()  # response is streaming; hide the spinner
         if not self._streamed_any:
             self._streamed_any = True
+            self._t_first_token = time.perf_counter()  # latency to first token
             sys.stdout.write("\033[1;32mclio › \033[0m")
+        self._token_count += 1
         sys.stdout.write(token)
         sys.stdout.flush()
+
+    def _print_metrics(self, t_end: float, streamed: bool = True, response: str = "") -> None:
+        """Print a compact, dim timing line under clio's response:
+        time-to-first-token (the wait before output starts), token count,
+        tokens/sec, and total wall time. Tokens are counted as streamed chunks,
+        which is ~1 token each from Ollama; the non-streamed fallback estimates
+        from word count and flags it with a tilde."""
+        if self._t_start is None:
+            return
+        total = t_end - self._t_start
+        if streamed and self._t_first_token is not None:
+            ttft = self._t_first_token - self._t_start
+            gen = max(t_end - self._t_first_token, 1e-6)
+            tps = self._token_count / gen
+            self.console.print(
+                f"[dim]⏱ {ttft:.1f}s to first token · {self._token_count} tok · "
+                f"{tps:.1f} tok/s · {total:.1f}s total[/dim]"
+            )
+        else:
+            toks = len(response.split())
+            tps = toks / total if total > 0 else 0.0
+            self.console.print(
+                f"[dim]⏱ {total:.1f}s total · ~{toks} tok · {tps:.1f} tok/s[/dim]"
+            )
+        self.console.print()
 
     # ----- slash command handlers -----------------------------------------
 
@@ -362,6 +405,9 @@ class ClioREPL:
         # wait. It's stopped the instant any output appears (first streamed token
         # or first tool call), so it sits just above clio's output / tool calls.
         self._streamed_any = False
+        self._t_first_token = None
+        self._token_count = 0
+        self._t_start = time.perf_counter()
         self._status = self.console.status("[dim]thinking…[/dim]", spinner="dots")
         self._status.start()
         try:
@@ -370,20 +416,21 @@ class ClioREPL:
             if self._status is not None:
                 self._status.stop()
                 self._status = None
+        t_end = time.perf_counter()
         response = strip_thinking_tags(response or "")
 
         if self._streamed_any:
             # Already printed token-by-token; just finish the line.
             sys.stdout.write("\n")
             sys.stdout.flush()
-            self.console.print()
+            self._print_metrics(t_end)
         elif not response.strip():
             self.console.print("[bold green]clio ›[/bold green]")
             self.console.print()
         else:
             # Fallback (provider didn't stream): render as one atomic print.
             self.console.print(Text.assemble(("clio › ", "bold green"), (response, "")))
-            self.console.print()
+            self._print_metrics(t_end, streamed=False, response=response)
 
     async def _preload_embeddings(self):
         """Warm the RAG embedding model at startup, with a visible spinner.
