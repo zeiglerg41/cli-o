@@ -27,6 +27,34 @@ def strip_thinking_tags(text: str) -> str:
     return text.strip()
 
 
+_INTENT_PHRASES = (
+    "let me ", "let's ", "let us ", "i'll ", "i will ", "i'm going to ", "i am going to ",
+    "now i", "next, i", "next i", "i need to search", "i need to look", "i need to check",
+    "i need to find", "searching for", "let me search", "let me look", "let me check",
+    "let me find", "let me investigate", "i should search", "i should look",
+)
+
+
+def _looks_like_unfinished_intent(text: str) -> bool:
+    """True if the assistant text announces a next action but doesn't take it.
+
+    Smaller local models often emit "Let me search more broadly:" with no tool
+    call, which would otherwise end the turn. Conservative: only fires on short
+    messages that trail off (end with a colon) or announce an action via a known
+    intent phrase, so genuine final answers are not mistaken for unfinished ones.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.endswith(":"):
+        return True
+    if len(t) < 240:
+        low = t.lower()
+        if any(p in low for p in _INTENT_PHRASES):
+            return True
+    return False
+
+
 class Agent:
     """AI agent with tool use capabilities."""
 
@@ -612,6 +640,12 @@ class Agent:
         recent_tool_results = []  # Track results to show user what failed
         MAX_IDENTICAL_CALLS = 3  # Terminate if same tool call repeats 3 times
 
+        # Continuation nudges: smaller local models sometimes narrate a next step
+        # ("Let me search more broadly:") without emitting the tool call, which would
+        # otherwise end the turn. Nudge them to actually act, capped to avoid loops.
+        continuation_nudges = 0
+        MAX_CONTINUATION_NUDGES = 2
+
         while turn < max_turns:
             turn += 1
             self.session_logger.log_iteration(turn, max_turns)
@@ -744,6 +778,26 @@ class Agent:
                     error_msg = f"Model returned empty response (finish_reason: {choice['finish_reason']})"
                     self.session_logger.log_error(error_msg)
                     return f"{error_msg}\nThis may indicate the model refused to respond or encountered an error."
+
+                # The model announced a next step but didn't call a tool. Nudge it
+                # to actually act instead of ending the turn (common on small local
+                # models). Capped by MAX_CONTINUATION_NUDGES to prevent loops.
+                if continuation_nudges < MAX_CONTINUATION_NUDGES and _looks_like_unfinished_intent(content):
+                    continuation_nudges += 1
+                    nudge = (
+                        "You described a next step but did not call a tool. If you still "
+                        "need to investigate, call the tool now (grep_files / find_files / "
+                        "read_file / list_directory). If you already have enough information, "
+                        "give your complete final answer now."
+                    )
+                    nudge_msg = {"role": "user", "content": nudge}
+                    messages.append(nudge_msg)
+                    self.messages.append(nudge_msg)  # keep history role-alternating
+                    self.session_logger.logger.info(
+                        f"Continuation nudge {continuation_nudges}/{MAX_CONTINUATION_NUDGES} "
+                        "(model narrated without a tool call)"
+                    )
+                    continue
 
                 # Trim in-memory messages to prevent unbounded growth
                 # Keep only last 20 messages (full history is in database)
