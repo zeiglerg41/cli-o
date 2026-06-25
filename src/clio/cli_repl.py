@@ -16,6 +16,13 @@ import sys
 import time
 from pathlib import Path
 
+try:  # Unix-only; used for Escape-to-cancel key watching during a running query
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - non-Unix
+    termios = None
+    tty = None
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -92,6 +99,11 @@ class ClioREPL:
         self._t_start = None            # perf_counter when the current turn's request began
         self._t_first_token = None      # perf_counter when the first token arrived
         self._token_count = 0           # streamed chunks this turn (≈ tokens for Ollama)
+        # Escape-to-cancel: while a query runs we watch stdin for ESC and cancel.
+        self._cancel_event = None       # asyncio.Event set when ESC is pressed
+        self._escape_armed = False      # is the stdin ESC watcher currently active?
+        self._escape_old = None         # saved termios state to restore
+        self._escape_fd = None
         self.config_manager = ConfigManager()
         self.context_manager = ContextManager(working_dir=launch_dir)
         self.auto_approve_session = False
@@ -211,6 +223,12 @@ class ClioREPL:
         if spinner_was_running:
             self._status.stop()
 
+        # The Escape watcher holds stdin in cbreak mode during the query; release
+        # it so prompt_toolkit can read the y/n/a answer, then re-arm afterward.
+        esc_was_armed = self._escape_armed
+        if esc_was_armed:
+            self._disarm_escape()
+
         self.console.print()
         # Show a diff preview of the change when we have the data.
         if diff_info and "new" in diff_info:
@@ -222,10 +240,28 @@ class ClioREPL:
             border_style="yellow",
             expand=False,
         ))
+        # Esc at the permission prompt cancels the whole query (same as Esc during
+        # generation). prompt_toolkit owns stdin here, so we bind Esc on the prompt
+        # itself; it sets the cancel event, then we wait to be torn down.
+        pkb = KeyBindings()
+
+        @pkb.add("escape", eager=True)
+        def _(event):
+            if self._cancel_event is not None:
+                self._cancel_event.set()
+            event.app.exit(result="\x00ESC")
+
         try:
-            answer = await self.session.prompt_async("  Allow? [y]es / [n]o / [a]lways: ")
+            answer = await self.session.prompt_async(
+                "  Allow? [y]es / [n]o / [a]lways: ", key_bindings=pkb
+            )
         except (EOFError, KeyboardInterrupt):
             answer = ""
+        if answer == "\x00ESC" and self._cancel_event is not None:
+            # A cancel is now in flight; block so the agent does no further work,
+            # and let the canceller raise CancelledError here to unwind cleanly.
+            await asyncio.sleep(3600)
+            return False
         answer = (answer or "").strip().lower()
         if answer in ("a", "always"):
             self.auto_approve_session = True
@@ -238,6 +274,9 @@ class ClioREPL:
             else:
                 self.console.print("[bold red]✗ denied[/bold red] [dim](command not run)[/dim]")
 
+        # Re-arm the Escape watcher for the rest of the query.
+        if esc_was_armed:
+            self._arm_escape()
         # Resume the spinner for the tool-execution / next model wait.
         if spinner_was_running and not self._streamed_any:
             self._status.start()
@@ -404,6 +443,67 @@ class ClioREPL:
             )
         self.console.print()
 
+    def _arm_escape(self):
+        """Start watching stdin for the Escape key so a running query can be
+        cancelled. No-op if stdin isn't a TTY or termios is unavailable."""
+        if self._escape_armed or termios is None or tty is None:
+            return
+        try:
+            if not sys.stdin.isatty():
+                return
+            fd = sys.stdin.fileno()
+            self._escape_old = termios.tcgetattr(fd)
+            tty.setcbreak(fd)  # char-at-a-time, keeps ISIG so Ctrl+C still works
+            asyncio.get_event_loop().add_reader(fd, self._on_escape_stdin)
+            self._escape_fd = fd
+            self._escape_armed = True
+        except Exception:
+            self._escape_armed = False
+
+    def _disarm_escape(self):
+        """Stop watching stdin and restore the terminal mode."""
+        if not self._escape_armed:
+            return
+        try:
+            asyncio.get_event_loop().remove_reader(self._escape_fd)
+        except Exception:
+            pass
+        try:
+            if self._escape_old is not None:
+                termios.tcsetattr(self._escape_fd, termios.TCSADRAIN, self._escape_old)
+        except Exception:
+            pass
+        self._escape_armed = False
+
+    def _on_escape_stdin(self):
+        """stdin reader callback: set the cancel event when ESC (0x1b) is seen."""
+        try:
+            data = os.read(self._escape_fd, 64)
+        except Exception:
+            return
+        if b"\x1b" in data and self._cancel_event is not None:
+            self._cancel_event.set()
+
+    async def _await_cancellable(self, task, cancel_event):
+        """Await `task`, but cancel it if `cancel_event` fires first.
+
+        Returns (cancelled: bool, result). On cancel the task is awaited to let
+        its CancelledError unwind cleanly before returning.
+        """
+        waiter = asyncio.create_task(cancel_event.wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if cancel_event.is_set() and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return True, None
+        return False, task.result()
+
     async def _handle_input(self, user_input: str):
         user_input = user_input.strip()
         if not user_input:
@@ -433,15 +533,44 @@ class ClioREPL:
         self._t_first_token = None
         self._token_count = 0
         self._t_start = time.perf_counter()
-        self._status = self.console.status("[dim]thinking…[/dim]", spinner="dots")
+        self._status = self.console.status(
+            "[dim]thinking…[/dim] [dim](esc to cancel)[/dim]", spinner="dots"
+        )
         self._status.start()
+
+        # Run the agent as a task and watch stdin for ESC so the user can cancel
+        # mid-query and immediately type again.
+        self._cancel_event = asyncio.Event()
+        chat_task = asyncio.create_task(self.agent.chat(user_input, context=context))
+        self._arm_escape()
+        cancelled = False
+        response = None
         try:
-            response = await self.agent.chat(user_input, context=context)
+            cancelled, response = await self._await_cancellable(chat_task, self._cancel_event)
         finally:
+            self._disarm_escape()
+            self._cancel_event = None
             if self._status is not None:
                 self._status.stop()
                 self._status = None
         t_end = time.perf_counter()
+
+        if cancelled:
+            # Close the line if we were mid-stream, note the cancel, and keep the
+            # conversation coherent (avoid two user messages in a row).
+            if self._streamed_any:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            try:
+                msgs = getattr(self.agent, "messages", None)
+                if msgs and msgs[-1].get("role") == "user":
+                    msgs.append({"role": "assistant", "content": "[cancelled by user]"})
+            except Exception:
+                pass
+            self.console.print("[yellow]⎋ cancelled[/yellow] [dim](type a new message)[/dim]")
+            self.console.print()
+            return
+
         response = strip_thinking_tags(response or "")
 
         if self._streamed_any:
