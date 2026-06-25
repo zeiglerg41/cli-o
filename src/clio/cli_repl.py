@@ -379,6 +379,31 @@ class ClioREPL:
         ))
         c.print()
 
+    def _print_memory_status(self):
+        """Show at startup whether project memory (CLIO.md) was loaded, so it's
+        visible that standing instructions are in effect this session."""
+        from .agent.memory import discover_memory_files
+        files = discover_memory_files(self.launch_dir)
+        if files:
+            total = 0
+            for f in files:
+                try:
+                    total += len(f.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            label = "file" if len(files) == 1 else "files"
+            self.console.print(
+                f"[green]✓ Project memory loaded[/green] "
+                f"[dim]({len(files)} CLIO.md {label}, {total} chars)[/dim]"
+            )
+            for f in files:
+                self.console.print(f"  [dim]• {f}[/dim]")
+        else:
+            self.console.print(
+                "[dim]No CLIO.md project memory found — create one to add standing instructions.[/dim]"
+            )
+        self.console.print()
+
     async def _handle_input(self, user_input: str):
         user_input = user_input.strip()
         if not user_input:
@@ -492,6 +517,7 @@ class ClioREPL:
         # partial lines (which patch_stdout cannot avoid). Native copy/scrollback
         # are preserved since we never use the alternate screen.
         self._print_welcome()
+        self._print_memory_status()
         await self._preload_embeddings()
         last_interrupt = 0.0
         while not self._should_exit:

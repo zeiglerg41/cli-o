@@ -488,6 +488,17 @@ class Agent:
         if self.original_working_dir and cwd != self.original_working_dir:
             system_prompt_with_date += f"\n\nNote: This conversation was originally started in: {self.original_working_dir}"
 
+        # Persistent project memory: load CLIO.md files (global + project chain)
+        # so standing conventions/instructions survive across sessions.
+        from .memory import load_project_memory
+        project_memory = load_project_memory(cwd)
+        if project_memory:
+            system_prompt_with_date += (
+                "\n\n# Project memory (from CLIO.md)\n"
+                "Standing instructions and context for this project. Follow these.\n\n"
+                f"{project_memory}"
+            )
+
         # Add recently edited files context if resuming
         if self.recent_files:
             files_list = "\n".join(f"  - {f}" for f in self.recent_files[:5])
