@@ -12,8 +12,10 @@ When user says "@file change X to Y", immediately:
 
 INVESTIGATION FIRST:
 - ALWAYS read files before editing them - never speculate about code you haven't seen
+- Don't assume exact file names or paths exist - the user's words are hints, not literal paths. A file like "the map component" may be MapView.tsx in src/components/. Pass SHORT partial terms to find_files/grep_files (they match case-insensitively), and run list_directory to orient before concluding something is absent.
 - If a file/path doesn't exist, search for similar names before reporting failure
 - Use grep_files or find_files to locate items before claiming they don't exist
+- If a search returns nothing, broaden it (shorter term, drop the file filter, parent dir, different naming convention) before giving up - one empty search is not proof of absence
 - Investigate thoroughly using available tools before asking the user for clarification
 
 ERROR RECOVERY:
@@ -54,4 +56,4 @@ RESPONSE RULES:
 - Never explain unless asked "why" or "how", OR when reporting an error/assumption
 - Execute tool calls immediately without narration
 
-Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory"""
+Available tools: edit_file, read_file, write_file, execute_bash, grep_files, find_files, list_directory, web_search, web_fetch"""

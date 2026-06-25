@@ -169,7 +169,34 @@ Throughout: treat the **system prompt + scaffolding** as the main lever for loca
 
 ---
 
-## 7. Sources
+## 7. Work log (what's done) & active plan
+
+### Done (2026-06-24)
+- **Response timing** in the REPL (time-to-first-token, tok/s, total).
+- **cwd-awareness** + `~`/path resolution (`_resolve_path`) so the model stops inventing paths.
+- **Project memory (`CLIO.md`)** — global `~/.clio/CLIO.md` + project chain; startup status line; injected into the system prompt. (Roadmap #1 ✅)
+- **Model default → `devstral-small-2:24b`** after benchmarking on the RTX 3090 (measured): devstral 49.5 gen / 1080 prompt tok/s vs the old qwen2.5:32b 2.4 / 33 (~20× faster, agentic-coder, clean tool calls). `qwen3-coder:30b` is faster gen (116) / top coding rank but had full-toolset tool-call quirks; kept as a `/model` option.
+- **Escape-to-cancel** — ESC cancels a running query (mid-generation and at the permission prompt) and returns to the prompt.
+- **Search robustness (the "literal model" fix).** Strongest cause, verified live: `find_files` used `find -name` (case-sensitive exact), so a bare term like `header` returned **0 matches** while `Header.jsx` existed; `grep_files` was case-sensitive. Fixes shipped:
+  - `find_files`: bare terms → case-insensitive substring (`-iname '*term*'`), prune `node_modules/.git/.next/.claude`.
+  - `grep_files`: ripgrep `--smart-case` (+ grep `-i` fallback), prune noise dirs.
+  - Tool **descriptions** rewritten to tell the model matching is case-insensitive substring and to broaden on empty results.
+  - **System prompt**: "don't assume exact filenames; pass short partial terms; one empty search isn't proof of absence."
+  - Per-project **structure map** can live in `CLIO.md` (added one for `vMonitor-Client-V2`).
+  - Verified: real `find_files("header")` now returns `Header.jsx`; `grep_files` lowercase matches `SelectedTrackTab` via smart-case.
+
+### Next: Sub-agent delegation (Roadmap #4) — queued, NOT yet built
+Why deferred: it's a real feature (not a tweak) and, on a weak local model, its main value is **context isolation** rather than smarter search (a sub-agent runs the same model). The forgiving tools + prompt steering above were the higher-leverage fix for literalness. Planned design when we build it:
+- A `dispatch_agent`/`task` tool that spawns a **child agent** with a restricted, read-only toolset (read/grep/find/list) for exploration.
+- Child runs its own bounded agent loop, returns a **summary** to the parent (keeps the main context lean — synergizes with context compaction, Roadmap #2).
+- Optional: run independent searches as **parallel** child calls.
+- Open questions: cost/latency of an extra local-model loop; how to cap child turns; whether to reuse the loaded model (no reload) for speed.
+
+Remaining roadmap order after sub-agents: context compaction (#2), todo tracking (#3), then extensibility (MCP/hooks), permission modes, reasoning display, tests.
+
+---
+
+## 8. Sources
 
 - clio source tree at `/home/gare/projects/cli-o/src/clio/` (file:line refs verified 2026-06-24).
 - Kir Shatrov, "Reverse engineering Claude Code" — https://kirshatrov.com/posts/claude-code-internals

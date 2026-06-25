@@ -343,31 +343,52 @@ class Tools:
             file_pattern: File pattern to match (e.g., "*.py", "*.js")
         """
         try:
-            # Use ripgrep if available, otherwise fall back to grep
-            cmd = f"rg --no-heading --line-number --color never '{pattern}' '{path}' --glob '{file_pattern}' 2>/dev/null || grep -rn '{pattern}' {path} --include='{file_pattern}' 2>/dev/null"
+            # ripgrep if available, else grep. --smart-case = case-insensitive unless
+            # the pattern contains uppercase, so lowercase terms match any case while
+            # an explicit "FooBar" stays precise. Skip node_modules/.git noise.
+            cmd = (
+                f"rg --no-heading --line-number --color never --smart-case "
+                f"--glob '!node_modules' --glob '!.git' --glob '!.claude' '{pattern}' '{path}' "
+                f"--glob '{file_pattern}' 2>/dev/null "
+                f"|| grep -rni '{pattern}' {path} --include='{file_pattern}' "
+                f"--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.claude 2>/dev/null"
+            )
             result = await self.execute_bash(cmd, timeout=10)
 
             if "Error:" in result or not result.strip():
-                return f"No matches found for pattern '{pattern}'"
+                return (f"No matches for '{pattern}' (searched case-smart). Try a shorter "
+                        f"pattern, remove the file filter, or broaden the path.")
 
             return result
         except Exception as e:
             return f"Error searching files: {str(e)}"
 
     async def find_files(self, name_pattern: str = "*", path: str = ".", file_type: str = "f") -> str:
-        """Find files matching a pattern.
+        """Find files by name (case-insensitive substring match by default).
 
         Args:
-            name_pattern: File name pattern (e.g., "*.py", "auth*")
+            name_pattern: Name or partial name. A bare term like "header" matches
+                "Header.jsx" (case-insensitive substring); globs ("*.py") also work.
             path: Directory to search in (default: current directory)
-            file_type: Type of file (f=file, d=directory, default: f)
+            file_type: f=file, d=directory (default: f)
         """
         try:
-            cmd = f"find '{path}' -type {file_type} -name '{name_pattern}' 2>/dev/null | head -100"
+            pat = (name_pattern or "*").strip()
+            # Forgiving match: a bare term (no glob chars) becomes a case-insensitive
+            # substring, so "header" finds "Header.jsx" instead of returning nothing.
+            if not any(ch in pat for ch in "*?["):
+                pat = f"*{pat}*"
+            prune = r"\( -name node_modules -o -name .git -o -name .next -o -name .claude \) -prune"
+            cmd = (
+                f"find '{path}' {prune} -o -type {file_type} -iname '{pat}' -print "
+                f"2>/dev/null | head -100"
+            )
             result = await self.execute_bash(cmd, timeout=10)
 
             if "Error:" in result or not result.strip():
-                return f"No files found matching pattern '{name_pattern}'"
+                return (f"No files found matching '{name_pattern}' "
+                        f"(searched case-insensitively as '{pat}'). Try a shorter term, "
+                        f"or list_directory to orient.")
 
             return result
         except Exception as e:
@@ -654,7 +675,7 @@ CRITICAL GROUNDING RULES:
                 "type": "function",
                 "function": {
                     "name": "grep_files",
-                    "description": "Search for a pattern in files. Use this to find code containing specific text, functions, classes, or keywords.",
+                    "description": "Search file contents for a regex pattern. Case-insensitive unless your pattern contains uppercase (smart-case), so lowercase terms match any casing. Searches recursively and skips node_modules/.git. If you get no matches, broaden it: shorten the pattern, drop the file_pattern filter, or search a parent directory before concluding the code isn't there.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -681,13 +702,13 @@ CRITICAL GROUNDING RULES:
                 "type": "function",
                 "function": {
                     "name": "find_files",
-                    "description": "Find files by name pattern. Use this to locate files when you don't know their exact path.",
+                    "description": "Find files by name when you don't know the exact path. Matching is case-insensitive substring by default: pass a short partial term like 'header' (it finds 'Header.jsx'), 'map', or 'config' — you do NOT need exact names, casing, or wildcards. Skips node_modules/.git. If empty, try a shorter term or list_directory to orient; don't assume a file is absent after one narrow guess.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name_pattern": {
                                 "type": "string",
-                                "description": "File name pattern (e.g., '*.py', 'auth*', 'test_*.js')",
+                                "description": "Name or partial name, e.g. 'header' (matches Header.jsx), 'map', or a glob like '*.py'. Bare terms match case-insensitively as substrings.",
                                 "default": "*"
                             },
                             "path": {
