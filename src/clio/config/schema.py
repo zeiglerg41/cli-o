@@ -9,6 +9,10 @@ class ProviderConfig(BaseModel):
     headers: Optional[Dict[str, str]] = None
     models: List[str] = []
     hostname: Optional[str] = None
+    # Optional per-model context window override (tokens), e.g.
+    # {"qwen3-coder-unsloth:30b": 65536}. Useful when the server runs a model
+    # below its architectural maximum.
+    contextWindows: Optional[Dict[str, int]] = Field(None, alias="context_windows")
 
     model_config = {"populate_by_name": True}
 

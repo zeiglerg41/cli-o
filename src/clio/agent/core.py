@@ -55,6 +55,31 @@ def _looks_like_unfinished_intent(text: str) -> bool:
     return False
 
 
+_FALSE_INABILITY_PATTERNS = [
+    # Tool-adjacent inability claims that are false for this agent: it can run
+    # shell/git commands and write files (gated by user permission prompts).
+    r"(?:don'?t|do not|doesn'?t) have (?:write|repository|repo|file ?system) access",
+    r"(?:don'?t|do not|doesn'?t) have access to (?:the |your )?(?:repo\b|repository|files?\b|codebase|file ?system|git\b|shell|terminal)",
+    r"(?:can'?t|cannot|unable to) (?:actually |directly )?(?:run|execute|perform) (?:the |any )?(?:git |shell |bash )?(?:commands?|operations?)",
+    r"(?:can'?t|cannot|unable to) (?:actually |directly )?(?:commit|push|modify|write to) (?:the |your )?(?:repo|repository|files?|codebase)",
+    r"(?:don'?t|do not) have (?:the )?(?:necessary |proper )?(?:permissions?|credentials?) to (?:run|execute|commit|push|modify|write)",
+    r"would need to be done (?:manually|with proper credentials)",
+]
+
+
+def _claims_false_inability(text: str) -> bool:
+    """True if the assistant falsely claims it cannot use tools it has.
+
+    Smaller local models sometimes pattern-match to a generic chat-assistant
+    script ("I don't have write access to the repository") instead of checking
+    their tool list. Narrow by design: only matches inability claims about
+    commands/git/files, which this agent's tools do cover, so honest statements
+    about external systems (accounts, remote servers) don't fire.
+    """
+    low = (text or "").lower()
+    return any(re.search(p, low) for p in _FALSE_INABILITY_PATTERNS)
+
+
 class Agent:
     """AI agent with tool use capabilities."""
 
@@ -126,6 +151,10 @@ class Agent:
         self.config_manager = config_manager
         self.tools = Tools(permission_callback)
         self.messages: List[Message] = []
+        # Context meter state: prompt size of the most recent LLM request
+        # (from the provider's usage stats) and a per-model window cache.
+        self.last_prompt_tokens: int = 0
+        self._context_window_cache: Dict[str, int] = {}
         self.tool_callback = tool_callback
         self.token_callback = token_callback
 
@@ -377,6 +406,32 @@ class Agent:
         # Return up to 10 most recent files
         return files[:10]
 
+    async def get_context_window(self) -> int:
+        """Context window of the current model (cached per provider/model)."""
+        from .context_window import get_context_window
+
+        cache_key = f"{self.current_provider_name}/{self.current_model}"
+        if cache_key not in self._context_window_cache:
+            config = self.config_manager.load()
+            provider_config = config.providers.get(self.current_provider_name)
+            override = None
+            base_url = None
+            if provider_config:
+                base_url = provider_config.baseURL
+                if provider_config.contextWindows:
+                    override = provider_config.contextWindows.get(self.current_model)
+            self._context_window_cache[cache_key] = await get_context_window(
+                self.current_model, base_url=base_url, override=override
+            )
+        return self._context_window_cache[cache_key]
+
+    def context_usage(self) -> int:
+        """Best-known prompt size of the next/last request, in tokens."""
+        if self.last_prompt_tokens:
+            return self.last_prompt_tokens
+        from .compaction import estimate_tokens
+        return estimate_tokens(self.messages, self.current_model)
+
     async def switch_model(self, provider_name: str, model: str) -> None:
         """Switch to a different provider and model."""
         config = self.config_manager.load()
@@ -463,6 +518,71 @@ class Agent:
 
         return input_cost + output_cost
 
+    async def compact(self, force: bool = False) -> str:
+        """Distill older history into a state snapshot, keeping the recent tail.
+
+        Returns a human-readable status string. On any failure the existing
+        history is left untouched (the sliding-window fallbacks still apply).
+        """
+        from .compaction import (
+            COMPACTION_FINAL_INSTRUCTION,
+            COMPACTION_SYSTEM_PROMPT,
+            COMPACTION_TRIGGER_TOKENS,
+            build_compacted_history,
+            estimate_tokens,
+            find_split_point,
+            truncate_old_tool_outputs,
+        )
+
+        original_tokens = estimate_tokens(self.messages, self.current_model)
+        if not force and original_tokens < COMPACTION_TRIGGER_TOKENS:
+            return f"No compaction needed ({original_tokens} estimated tokens)."
+        if len(self.messages) < 4:
+            return "Not enough history to compact."
+
+        truncated = truncate_old_tool_outputs(self.messages)
+        split = find_split_point(truncated)
+        to_compress = truncated[:split]
+        to_keep = truncated[split:]
+        if not to_compress:
+            return "No safe compaction point found; history unchanged."
+
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+                    *to_compress,
+                    {"role": "user", "content": COMPACTION_FINAL_INSTRUCTION},
+                ],
+                model=self.current_model,
+                tools=None,
+            )
+            summary = strip_thinking_tags(
+                (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            ).strip()
+        except Exception as e:
+            self.session_logger.log_error(f"Compaction failed: {e}")
+            return f"Compaction failed ({e}); history unchanged."
+
+        if "<state_snapshot>" not in summary:
+            self.session_logger.log_error("Compaction failed: empty or malformed snapshot")
+            return "Compaction failed (model returned no snapshot); history unchanged."
+
+        new_messages = build_compacted_history(summary, to_keep)
+        new_tokens = estimate_tokens(new_messages, self.current_model)
+        if new_tokens >= original_tokens:
+            self.session_logger.log_error(
+                f"Compaction inflated history ({original_tokens} -> {new_tokens}); discarded"
+            )
+            return "Compaction produced a larger history; discarded."
+
+        self.messages = new_messages
+        self.session_logger.logger.info(
+            f"Compacted history: {original_tokens} -> {new_tokens} estimated tokens "
+            f"({split} messages summarized, {len(to_keep)} kept)"
+        )
+        return f"Compacted: ~{original_tokens} -> ~{new_tokens} tokens ({split} messages summarized)."
+
     async def chat(self, user_message: str, context: str = "") -> str:
         """Send a message and get response."""
         # Log user message
@@ -485,6 +605,13 @@ class Agent:
             role="user",
             content=user_message
         ))
+
+        # Auto-compaction: when in-memory history grows past the trigger,
+        # summarize the older portion into a state snapshot before building
+        # the request. Failures leave history untouched (windowing still applies).
+        from .compaction import COMPACTION_TRIGGER_TOKENS, apply_window, estimate_tokens
+        if estimate_tokens(self.messages, self.current_model) >= COMPACTION_TRIGGER_TOKENS:
+            self.session_logger.logger.info(await self.compact(force=True))
 
         # Retrieve relevant context using RAG (if available)
         rag_context = []
@@ -527,6 +654,16 @@ class Agent:
                 f"{project_memory}"
             )
 
+        # Current task plan (maintained by the model via update_plan). Injected
+        # every turn so it survives compaction and windowing.
+        plan_rendered = self.tools.render_plan()
+        if plan_rendered:
+            system_prompt_with_date += (
+                "\n\n# Current plan\n"
+                f"{plan_rendered}\n"
+                "Keep this plan updated with update_plan as you complete steps."
+            )
+
         # Add recently edited files context if resuming
         if self.recent_files:
             files_list = "\n".join(f"  - {f}" for f in self.recent_files[:5])
@@ -551,8 +688,8 @@ class Agent:
         # Reduced from 40 to 20 to handle code-heavy conversations
         MAX_CONTEXT_MESSAGES = 20  # Keep last 20 messages (10 user/assistant pairs)
 
-        # Take only recent messages
-        recent_messages = self.messages[-MAX_CONTEXT_MESSAGES:] if len(self.messages) > MAX_CONTEXT_MESSAGES else self.messages
+        # Take only recent messages (never dropping a leading compaction snapshot)
+        recent_messages = apply_window(self.messages, MAX_CONTEXT_MESSAGES)
 
         # Additional safety: Estimate tokens and truncate further if needed
         # Use tiktoken for accurate token counting
@@ -581,7 +718,7 @@ class Agent:
 
         # If still too large, aggressively reduce to last 10 messages
         if estimated_tokens > MAX_CONTEXT_TOKENS:
-            recent_messages = self.messages[-10:] if len(self.messages) > 10 else self.messages
+            recent_messages = apply_window(self.messages, 10)
             self.session_logger.logger.warning(
                 f"Context reduced to last 10 messages due to token count: {estimated_tokens}"
             )
@@ -645,6 +782,12 @@ class Agent:
         # otherwise end the turn. Nudge them to actually act, capped to avoid loops.
         continuation_nudges = 0
         MAX_CONTINUATION_NUDGES = 2
+
+        # Anti-hallucination nudge: if the model falsely claims it lacks
+        # tool access (e.g. "I don't have write access to the repository"),
+        # correct it once and let it retry instead of showing the user a
+        # fabricated limitation.
+        inability_nudges = 0
 
         while turn < max_turns:
             turn += 1
@@ -728,6 +871,26 @@ class Agent:
             choice = response["choices"][0]
             message = choice["message"]
 
+            # Recover tool calls emitted as literal text (small local models
+            # sometimes write the call JSON into content instead of returning
+            # a structured tool_calls entry). Converting them here routes them
+            # through the normal execution path: permissions, loop detection,
+            # and batching all still apply.
+            if tools and not message.get("tool_calls") and message.get("content"):
+                from .tool_call_recovery import extract_text_tool_calls, to_structured_tool_calls
+                known_tools = {t["function"]["name"] for t in tools}
+                cleaned, recovered = extract_text_tool_calls(message["content"], known_tools)
+                if recovered:
+                    message = {
+                        **message,
+                        "content": cleaned or None,
+                        "tool_calls": to_structured_tool_calls(recovered, f"recovered_t{turn}"),
+                    }
+                    self.session_logger.logger.info(
+                        f"Recovered {len(recovered)} text-embedded tool call(s): "
+                        + ", ".join(c["name"] for c in recovered)
+                    )
+
             # Log LLM response
             self.session_logger.log_llm_response(
                 content=message.get("content"),
@@ -740,6 +903,8 @@ class Agent:
                 usage = response["usage"]
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
+                if prompt_tokens:
+                    self.last_prompt_tokens = prompt_tokens
 
                 # Calculate cost
                 cost_usd = self._calculate_cost(
@@ -799,15 +964,35 @@ class Agent:
                     )
                     continue
 
+                # The model claimed an inability it doesn't have. Correct it
+                # once; only fires when tools are actually enabled.
+                if tools and inability_nudges < 1 and _claims_false_inability(content):
+                    inability_nudges += 1
+                    nudge = (
+                        "Correction: you DO have tool access. You can run any shell "
+                        "command via execute_bash (including git add/commit/push; "
+                        "state-changing commands just show the user a permission "
+                        "prompt), and you can read/write/edit files. Redo your answer: "
+                        "either call the tool now to perform/verify the action, or "
+                        "answer the question WITHOUT claiming you lack access."
+                    )
+                    nudge_msg = {"role": "user", "content": nudge}
+                    messages.append(nudge_msg)
+                    self.messages.append(nudge_msg)
+                    self.session_logger.logger.info(
+                        "Inability nudge (model falsely claimed missing tool access)"
+                    )
+                    continue
+
                 # Trim in-memory messages to prevent unbounded growth
                 # Keep only last 20 messages (full history is in database)
                 # Reduced to prevent 429 rate limit errors in code-heavy conversations
                 MAX_CONTEXT_MESSAGES = 20
                 if len(self.messages) > MAX_CONTEXT_MESSAGES:
-                    trimmed_count = len(self.messages) - MAX_CONTEXT_MESSAGES
-                    self.messages = self.messages[-MAX_CONTEXT_MESSAGES:]
+                    before = len(self.messages)
+                    self.messages = apply_window(self.messages, MAX_CONTEXT_MESSAGES)
                     self.session_logger.logger.info(
-                        f"Trimmed {trimmed_count} old messages from memory (retained in database)"
+                        f"Trimmed {before - len(self.messages)} old messages from memory (retained in database)"
                     )
 
                 # Strip thinking tags before returning
@@ -914,6 +1099,7 @@ class Agent:
     def clear_history(self) -> None:
         """Clear conversation history."""
         self.messages.clear()
+        self.last_prompt_tokens = 0
     
     def get_history(self) -> List[Message]:
         """Get conversation history."""

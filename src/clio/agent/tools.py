@@ -37,6 +37,8 @@ class Tools:
         # Batching state
         self.in_batch = False
         self.batch_edits = {}  # file_path -> list of edits to send at end of batch
+        # Task checklist maintained by the model via update_plan
+        self.current_plan: Optional[dict] = None
     
     async def request_permission(self, operation: str, details: str, diff_info: dict = None) -> bool:
         """Request permission for an operation."""
@@ -566,6 +568,37 @@ CRITICAL GROUNDING RULES:
         except Exception as e:
             return f"Error fetching URL: {str(e)}"
     
+    PLAN_STATUS_ICONS = {"pending": "○", "in_progress": "→", "completed": "✔"}
+
+    def render_plan(self) -> str:
+        """Render the current plan as a checklist, or '' if none."""
+        if not self.current_plan:
+            return ""
+        lines = []
+        for item in self.current_plan["plan"]:
+            icon = self.PLAN_STATUS_ICONS.get(item["status"], "○")
+            lines.append(f"{icon} {item['step']}")
+        return "\n".join(lines)
+
+    async def update_plan(self, plan: list, explanation: str = "") -> str:
+        """Update the task plan/checklist (schema follows Codex CLI's update_plan)."""
+        valid_statuses = set(self.PLAN_STATUS_ICONS)
+        if not isinstance(plan, list) or not plan:
+            return "Error: 'plan' must be a non-empty list of {step, status} items"
+        in_progress = 0
+        for item in plan:
+            if not isinstance(item, dict) or not item.get("step"):
+                return "Error: each plan item needs a non-empty 'step' string"
+            status = item.get("status", "pending")
+            if status not in valid_statuses:
+                return f"Error: invalid status '{status}' (use pending, in_progress, or completed)"
+            item["status"] = status
+            in_progress += status == "in_progress"
+        if in_progress > 1:
+            return "Error: at most one step can be in_progress at a time"
+        self.current_plan = {"explanation": explanation, "plan": plan}
+        return f"Plan updated:\n{self.render_plan()}"
+
     def get_tool_definitions(self) -> list[dict]:
         """Get OpenAI function definitions for tools."""
         return [
@@ -768,9 +801,50 @@ CRITICAL GROUNDING RULES:
                         "required": ["url"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_plan",
+                    "description": (
+                        "Updates the task plan/checklist. Provide an optional explanation and "
+                        "the full list of plan items, each with a step and status. "
+                        "At most one step can be in_progress at a time. "
+                        "Use this at the start of multi-step tasks and update statuses as you work."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "explanation": {
+                                "type": "string",
+                                "description": "Optional explanation for this plan update"
+                            },
+                            "plan": {
+                                "type": "array",
+                                "description": "The complete list of steps",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "step": {
+                                            "type": "string",
+                                            "description": "Task step text"
+                                        },
+                                        "status": {
+                                            "type": "string",
+                                            "enum": ["pending", "in_progress", "completed"],
+                                            "description": "Step status"
+                                        }
+                                    },
+                                    "required": ["step", "status"]
+                                }
+                            }
+                        },
+                        "required": ["plan"]
+                    }
+                }
             }
         ]
-    
+
     async def execute_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool by name."""
         if tool_name == "read_file":
@@ -791,5 +865,7 @@ CRITICAL GROUNDING RULES:
             return await self.web_search(**arguments)
         elif tool_name == "web_fetch":
             return await self.web_fetch(**arguments)
+        elif tool_name == "update_plan":
+            return await self.update_plan(**arguments)
         else:
             return f"Error: Unknown tool: {tool_name}"

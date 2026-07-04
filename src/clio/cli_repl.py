@@ -154,6 +154,11 @@ class ClioREPL:
             buf.delete(count=event.arg)
             _recomplete(buf)
 
+        # Resolved context window for the current model; None until the first
+        # response resolves it (the toolbar shows a provisional value until then).
+        self._ctx_window = None
+
+        from prompt_toolkit.styles import Style
         self.session = PromptSession(
             history=FileHistory(str(history_path)),
             completer=ClioCompleter(list(self.router.commands.keys())),
@@ -163,6 +168,9 @@ class ClioREPL:
             cursor=CursorShape.BLINKING_BLOCK,
             # On submit, erase the input line; we echo it ourselves in the loop.
             erase_when_done=True,
+            # Persistent context meter pinned below the input, Claude Code style.
+            bottom_toolbar=self._context_toolbar,
+            style=Style.from_dict({"bottom-toolbar": "noreverse"}),
         )
         self._should_exit = False
 
@@ -176,6 +184,7 @@ class ClioREPL:
         r.register("/add", self._cmd_add, "Add a file/folder to context: /add <path>")
         r.register("/remove", self._cmd_remove, "Remove a file from context: /remove <path>")
         r.register("/clear", self._cmd_clear, "Clear conversation history")
+        r.register("/compact", self._cmd_compact, "Summarize older history to free context")
         r.register("/config", self._cmd_config, "Show config file path")
         r.register("/exit", self._cmd_exit, "Exit clio")
         r.register("/quit", self._cmd_exit, "Exit clio")
@@ -335,7 +344,48 @@ class ClioREPL:
             self.console.print(
                 f"[dim]⏱ {total:.1f}s total · ~{toks} tok · {tps:.1f} tok/s[/dim]"
             )
-        self.console.print()
+
+    def _ctx_meter_text(self) -> tuple[str, str]:
+        """(style, text) for the persistent context bar shown under the input,
+        e.g. ' ctx [████░░░░░░░░░░░░░░░░] 18% (5,900 / 32,768 tok) · model'.
+
+        Sync by design (prompt_toolkit calls it on every redraw): reads the
+        cached window; until the first response resolves it, falls back to the
+        known-families table and marks the value provisional with '~'.
+        """
+        used = self.agent.context_usage()
+        window = self._ctx_window
+        provisional = ""
+        if not window:
+            from .agent.context_window import DEFAULT_CONTEXT_WINDOW, lookup_known_window
+            window = lookup_known_window(self.agent.current_model) or DEFAULT_CONTEXT_WINDOW
+            provisional = "~"
+        pct = min(used / window * 100, 100.0)
+        slots = 20
+        filled = min(slots, round(pct / 100 * slots))
+        bar = "█" * filled + "░" * (slots - filled)
+        style = "fg:#666666" if pct < 70 else ("fg:ansiyellow" if pct < 90 else "fg:ansired")
+        text = (
+            f" ctx [{bar}] {pct:.0f}%{provisional} ({used:,} / {window:,} tok)"
+            f" · {self.agent.current_model}"
+        )
+        return style, text
+
+    def _context_toolbar(self):
+        """bottom_toolbar callable for prompt_toolkit; never raises."""
+        try:
+            style, text = self._ctx_meter_text()
+            return [(style, text)]
+        except Exception:
+            return []
+
+    async def _refresh_ctx_window(self) -> None:
+        """Resolve the current model's context window (post-response, when a
+        local model is guaranteed loaded so Ollama reports its runtime size)."""
+        try:
+            self._ctx_window = await self.agent.get_context_window()
+        except Exception:
+            pass
 
     # ----- slash command handlers -----------------------------------------
 
@@ -356,6 +406,8 @@ class ClioREPL:
             provider, model = parts
             try:
                 await self.agent.switch_model(provider, model)
+                # New model: window unknown until its first response resolves it.
+                self._ctx_window = None
                 return f"Switched to [green]{model}[/green] @ {provider}"
             except ValueError as e:
                 return f"[red]{e}[/red]"
@@ -393,6 +445,9 @@ class ClioREPL:
         self.agent.clear_history()
         self.context_manager.clear()
         return "Conversation history and context cleared."
+
+    async def _cmd_compact(self, args: str) -> str:
+        return await self.agent.compact(force=True)
 
     def _cmd_config(self, args: str) -> str:
         return f"Config file: {self.config_manager.config_path}"
@@ -578,6 +633,8 @@ class ClioREPL:
             sys.stdout.write("\n")
             sys.stdout.flush()
             self._print_metrics(t_end)
+            await self._refresh_ctx_window()
+            self.console.print()
         elif not response.strip():
             self.console.print("[bold green]clio ›[/bold green]")
             self.console.print()
@@ -585,6 +642,8 @@ class ClioREPL:
             # Fallback (provider didn't stream): render as one atomic print.
             self.console.print(Text.assemble(("clio › ", "bold green"), (response, "")))
             self._print_metrics(t_end, streamed=False, response=response)
+            await self._refresh_ctx_window()
+            self.console.print()
 
     async def _preload_embeddings(self):
         """Warm the RAG embedding model at startup, with a visible spinner.
