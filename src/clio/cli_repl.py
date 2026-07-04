@@ -86,6 +86,7 @@ class ClioREPL:
 
     def __init__(self, launch_dir: str, conversation_id=None):
         self.launch_dir = launch_dir
+        self._resumed = conversation_id is not None
         # highlight=False stops Rich from auto-coloring numbers/paths in our text
         self.console = Console(highlight=False)
         # The logged-in user, used as the input prompt. getpass.getuser() works
@@ -473,6 +474,58 @@ class ClioREPL:
         ))
         c.print()
 
+    def _print_resume_transcript(self):
+        """On --continue, replay the loaded history as it appeared live
+        (Claude Code style), so the user sees the chat they're resuming.
+
+        Renders from agent.messages (the last <=20 reconstructed from the DB):
+        user/assistant text styled like live turns, tool calls as dim markers,
+        tool outputs skipped, compaction snapshots shown as a one-line notice.
+        """
+        msgs = getattr(self.agent, "messages", None)
+        if not msgs:
+            return
+        from .agent.compaction import SUMMARY_ACK, is_summary_message
+        from .agent.core import strip_thinking_tags
+
+        c = self.console
+        conv = {}
+        try:
+            conv = self.agent.history_db.get_conversation(self.agent.conversation_id) or {}
+        except Exception:
+            pass
+        title = conv.get("title") or ""
+        header = f"── resuming conversation #{self.agent.conversation_id}"
+        if title:
+            header += f" · {title}"
+        c.print(f"[dim]{header} ──[/dim]")
+        c.print()
+
+        for m in msgs:
+            role = m.get("role")
+            content = m.get("content") or ""
+            if role == "user":
+                if is_summary_message(m):
+                    c.print("[dim](earlier conversation was compacted into a snapshot)[/dim]")
+                    continue
+                c.print(Text.assemble((f"{self.username} › ", "bold cyan"), (str(content), "")))
+                c.print()
+            elif role == "assistant":
+                if content == SUMMARY_ACK:
+                    continue
+                for tc in m.get("tool_calls") or []:
+                    name = (tc.get("function") or {}).get("name", "tool")
+                    c.print(f"[dim]→ {name}[/dim]")
+                text = strip_thinking_tags(str(content)) if content else ""
+                if text:
+                    c.print(Text.assemble(("clio › ", "bold green"), (text, "")))
+                    c.print()
+            # tool results are skipped: they're bulky and already reflected in
+            # the assistant's replies
+
+        c.print("[dim]── end of history · continue below ──[/dim]")
+        c.print()
+
     def _print_memory_status(self):
         """Show at startup whether project memory (CLIO.md) was loaded, so it's
         visible that standing instructions are in effect this session."""
@@ -706,6 +759,8 @@ class ClioREPL:
         # are preserved since we never use the alternate screen.
         self._print_welcome()
         self._print_memory_status()
+        if self._resumed:
+            self._print_resume_transcript()
         await self._preload_embeddings()
         last_interrupt = 0.0
         while not self._should_exit:
