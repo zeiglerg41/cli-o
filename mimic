@@ -4,8 +4,8 @@
 # Build image if it doesn't exist
 if [[ "$(docker images -q clio:latest 2> /dev/null)" == "" ]]; then
     echo "Building CLIO image..."
-    docker-compose build
+    docker compose build
 fi
 
 # Run the container
-docker-compose run --rm clio "$@"
+docker compose run --rm clio "$@"
