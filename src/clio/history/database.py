@@ -82,6 +82,13 @@ class HistoryDatabase:
             # Column already exists, ignore
             pass
 
+        # Migrate: per-conversation task plan (JSON from the update_plan tool)
+        try:
+            cursor.execute("ALTER TABLE conversations ADD COLUMN plan TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
         # Usage stats table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS usage_stats (
@@ -331,6 +338,24 @@ class HistoryDatabase:
         """, (conversation_id,))
 
         return [dict(row) for row in cursor.fetchall()]
+
+    def save_plan(self, conversation_id: int, plan_json: str):
+        """Persist the conversation's current task plan (JSON string)."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE conversations SET plan = ? WHERE id = ?",
+            (plan_json, conversation_id),
+        )
+        self.conn.commit()
+
+    def get_plan(self, conversation_id: int) -> Optional[str]:
+        """Return the conversation's saved plan JSON, or None."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT plan FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else None
 
     def star_conversation(self, conversation_id: int):
         """Mark a conversation as starred (keep forever).

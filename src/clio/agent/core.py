@@ -35,23 +35,36 @@ _INTENT_PHRASES = (
 )
 
 
+# Closing pleasantries that contain intent phrases but are genuine endings.
+_INTENT_EXCLUSIONS = ("let me know", "let us know")
+
+
 def _looks_like_unfinished_intent(text: str) -> bool:
     """True if the assistant text announces a next action but doesn't take it.
 
     Smaller local models often emit "Let me search more broadly:" with no tool
-    call, which would otherwise end the turn. Conservative: only fires on short
-    messages that trail off (end with a colon) or announce an action via a known
-    intent phrase, so genuine final answers are not mistaken for unfinished ones.
+    call, which would otherwise end the turn. Fires on messages that trail off
+    (end with a colon), short messages containing an intent phrase, or LONG
+    messages whose FINAL sentence announces an action (observed live: a long
+    analysis ending "Let me look into this a bit more by checking..." slipped
+    through the old whole-message length gate).
     """
     t = (text or "").strip()
     if not t:
         return False
     if t.endswith(":"):
         return True
-    if len(t) < 240:
-        low = t.lower()
-        if any(p in low for p in _INTENT_PHRASES):
-            return True
+    low = t.lower()
+    if len(t) < 240 and any(p in low for p in _INTENT_PHRASES):
+        return True
+    # Long messages: judge only the final sentence, so a complete analysis that
+    # merely mentions "let me check X" mid-answer doesn't fire, but one that
+    # ENDS by announcing an action does.
+    last_sentence = re.split(r"(?<=[.!?])\s+", low)[-1]
+    if any(p in last_sentence for p in _INTENT_PHRASES) and not any(
+        x in last_sentence for x in _INTENT_EXCLUSIONS
+    ):
+        return True
     return False
 
 
@@ -198,6 +211,15 @@ class Agent:
 
             # Extract recently edited/written files from full history (for context)
             self.recent_files = self._extract_recent_files(messages)
+
+            # Restore the task plan so --continue picks up where it left off
+            plan_json = self.history_db.get_plan(self.conversation_id)
+            if plan_json:
+                try:
+                    self.tools.current_plan = json.loads(plan_json)
+                    self.session_logger.logger.info("Restored task plan from conversation")
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
             # Use hybrid approach: last 20 messages verbatim, RAG for older context
             # (RAG retrieval happens per-query in chat() method)
@@ -1058,6 +1080,15 @@ class Agent:
 
                     # Execute tool
                     result = await self.tools.execute_tool(tool_name, arguments)
+
+                    # Persist plan updates so resumed conversations restore them
+                    if tool_name == "update_plan" and self.tools.current_plan:
+                        try:
+                            self.history_db.save_plan(
+                                self.conversation_id, json.dumps(self.tools.current_plan)
+                            )
+                        except Exception as e:
+                            self.session_logger.logger.warning(f"Plan persistence failed: {e}")
 
                     # Track tool results for loop detection
                     recent_tool_results.append((tool_name, result))
