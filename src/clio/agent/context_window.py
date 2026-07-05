@@ -112,6 +112,8 @@ async def get_context_window(
     model: str,
     base_url: Optional[str] = None,
     override: Optional[int] = None,
+    provider_type: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> int:
     """Resolve the context window for a model (see module docstring for order)."""
     if override:
@@ -119,4 +121,9 @@ async def get_context_window(
     from_ollama = await query_ollama_context_window(model, base_url) if base_url else None
     if from_ollama:
         return from_ollama
+    if provider_type == "anthropic" and api_key:
+        from ..providers.model_catalog import query_anthropic_model
+        info = await query_anthropic_model(model, api_key)
+        if info and isinstance(info.get("max_input_tokens"), int):
+            return info["max_input_tokens"]
     return lookup_known_window(model) or DEFAULT_CONTEXT_WINDOW

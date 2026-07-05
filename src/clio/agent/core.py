@@ -168,6 +168,8 @@ class Agent:
         # (from the provider's usage stats) and a per-model window cache.
         self.last_prompt_tokens: int = 0
         self._context_window_cache: Dict[str, int] = {}
+        # Dynamic tool-support cache: provider/model -> ToolSupport
+        self._tool_support_cache: Dict[str, Any] = {}
         self.tool_callback = tool_callback
         self.token_callback = token_callback
 
@@ -428,24 +430,55 @@ class Agent:
         # Return up to 10 most recent files
         return files[:10]
 
+    def _provider_config(self):
+        config = self.config_manager.load()
+        return config.providers.get(self.current_provider_name)
+
     async def get_context_window(self) -> int:
         """Context window of the current model (cached per provider/model)."""
         from .context_window import get_context_window
 
         cache_key = f"{self.current_provider_name}/{self.current_model}"
         if cache_key not in self._context_window_cache:
-            config = self.config_manager.load()
-            provider_config = config.providers.get(self.current_provider_name)
+            provider_config = self._provider_config()
             override = None
             base_url = None
+            api_key = None
+            provider_type = None
             if provider_config:
                 base_url = provider_config.baseURL
+                api_key = provider_config.apiKey
+                provider_type = provider_config.type
                 if provider_config.contextWindows:
                     override = provider_config.contextWindows.get(self.current_model)
             self._context_window_cache[cache_key] = await get_context_window(
-                self.current_model, base_url=base_url, override=override
+                self.current_model, base_url=base_url, override=override,
+                provider_type=provider_type, api_key=api_key,
             )
         return self._context_window_cache[cache_key]
+
+    async def resolve_tool_support(self):
+        """Dynamic tool-support resolution (cached per provider/model).
+
+        Ollama capability list > Anthropic Models API > static matrix >
+        assume-supported. The agent loop downgrades at runtime on genuine
+        provider rejections, so assuming True is safe for unknown models.
+        """
+        from ..providers.model_catalog import ToolSupport, resolve_tool_support
+
+        cache_key = f"{self.current_provider_name}/{self.current_model}"
+        cached = self._tool_support_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        provider_config = self._provider_config()
+        result = await resolve_tool_support(
+            provider_config.type if provider_config else "openai-compatible",
+            self.current_model,
+            base_url=provider_config.baseURL if provider_config else None,
+            api_key=provider_config.apiKey if provider_config else None,
+        )
+        self._tool_support_cache[cache_key] = result
+        return result
 
     def context_usage(self) -> int:
         """Best-known prompt size of the next/last request, in tokens."""
@@ -767,16 +800,21 @@ class Agent:
         # Get tool definitions
         tools = self.tools.get_tool_definitions()
 
-        # Check if model supports tool calling
-        if tools and not self.provider.supports_tools(self.current_model):
-            warning_msg = (
-                f"Warning: Model '{self.current_model}' does not support tool calling. "
-                f"Tools will be disabled for this conversation. "
-                f"Consider switching to a model that supports tools."
-            )
-            self.session_logger.logger.warning(warning_msg)
-            print(warning_msg)  # Also print to console
-            tools = None  # Disable tools
+        # Check if model supports tool calling (dynamic: Ollama capability
+        # list > Anthropic Models API > static matrix > assume-supported).
+        # Only positive evidence of NO support disables tools; unknown models
+        # get tools and the loop downgrades at runtime if the provider rejects.
+        if tools:
+            tool_support = await self.resolve_tool_support()
+            if not tool_support.supported:
+                warning_msg = (
+                    f"Warning: Model '{self.current_model}' does not support tool "
+                    f"calling (source: {tool_support.source}). Tools disabled for "
+                    f"this conversation."
+                )
+                self.session_logger.logger.warning(warning_msg)
+                print(warning_msg)  # Also print to console
+                tools = None  # Disable tools
 
         # Log request details
         total_msg_length = sum(len(str(m.get('content', ''))) for m in messages)
@@ -837,6 +875,23 @@ class Agent:
                 raise
             except Exception as e:
                 error_str = str(e)
+
+                # Runtime tool-support downgrade: the provider says this model
+                # can't do tool calling. Strip tools, remember, and retry the
+                # same iteration as a plain chat model.
+                if tools:
+                    from ..providers.model_catalog import ToolSupport, is_tool_rejection_error
+                    if is_tool_rejection_error(error_str):
+                        cache_key = f"{self.current_provider_name}/{self.current_model}"
+                        self._tool_support_cache[cache_key] = ToolSupport(False, "runtime")
+                        warning_msg = (
+                            f"Model '{self.current_model}' rejected tool calling at "
+                            f"runtime; continuing without tools."
+                        )
+                        self.session_logger.logger.warning(warning_msg)
+                        print(warning_msg)
+                        tools = None
+                        continue
 
                 # Handle 429 rate limit errors with automatic retry
                 if "429" in error_str or "rate_limit_exceeded" in error_str:

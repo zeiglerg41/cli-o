@@ -41,7 +41,16 @@ TOOL_SUPPORT_MATRIX: Dict[str, Dict[str, bool]] = {
         "o4-mini": True,
     },
     "anthropic": {
-        # Claude 4.5 family (latest)
+        # Claude 5 family / current frontier. Offline fallback only — live
+        # resolution via the Models API in model_catalog.py is preferred.
+        "claude-fable-5": True,
+        "claude-opus-4-8": True,
+        "claude-opus-4-7": True,
+        "claude-opus-4-6": True,
+        "claude-sonnet-5": True,
+        "claude-sonnet-4-6": True,
+
+        # Claude 4.5 family
         "claude-opus-4-5": True,
         "claude-opus-4-5-20251101": True,
         "claude-sonnet-4-5": True,
