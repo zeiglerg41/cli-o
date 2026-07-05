@@ -176,6 +176,9 @@ class OpenAICompatibleProvider(Provider):
             "messages": messages,
             **kwargs
         }
+        if self._is_openrouter():
+            # OpenRouter usage accounting: exact billed cost in usage.cost
+            params["extra_body"] = {"usage": {"include": True}}
 
         if tools:
             params["tools"] = tools
@@ -234,11 +237,7 @@ class OpenAICompatibleProvider(Provider):
                     )
                     for choice in response.choices
                 ],
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                    "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                    "total_tokens": response.usage.total_tokens if response.usage else 0
-                } if response.usage else None
+                "usage": self._usage_dict(response.usage)
             }
 
     @staticmethod
@@ -267,6 +266,36 @@ class OpenAICompatibleProvider(Provider):
             "finish_reason": finish_reason,
         }
 
+    @staticmethod
+    def _usage_dict(usage) -> Optional[Dict[str, Any]]:
+        """Normalize an SDK/raw usage object to a dict, preserving extra
+        fields like OpenRouter's billed 'cost' (verified live in its
+        usage-accounting responses)."""
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            dumped = usage
+        elif hasattr(usage, "model_dump"):
+            dumped = usage.model_dump()
+        else:
+            dumped = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            }
+        out = {
+            "prompt_tokens": dumped.get("prompt_tokens", 0) or 0,
+            "completion_tokens": dumped.get("completion_tokens", 0) or 0,
+            "total_tokens": dumped.get("total_tokens", 0) or 0,
+        }
+        if isinstance(dumped.get("cost"), (int, float)):
+            out["cost"] = dumped["cost"]
+        return out
+
+    def _is_openrouter(self) -> bool:
+        # self.base_url only exists on the OpenWebUI path; read config instead
+        return "openrouter" in (self.config.get("base_url") or "")
+
     async def stream_chat(
         self,
         messages: List[Message],
@@ -279,8 +308,14 @@ class OpenAICompatibleProvider(Provider):
             "model": model,
             "messages": messages,
             "stream": True,
+            # Ask for the final usage chunk (OpenAI-compatible servers that
+            # don't know this option get a retry without it, below).
+            "stream_options": {"include_usage": True},
             **kwargs
         }
+        if self._is_openrouter():
+            # OpenRouter usage accounting: exact billed cost in usage.cost
+            params["extra_body"] = {"usage": {"include": True}}
 
         if tools:
             params["tools"] = tools
@@ -303,12 +338,21 @@ class OpenAICompatibleProvider(Provider):
                                 break
                             yield json_module.loads(data)
         else:
-            stream = await self.client.chat.completions.create(**params)
+            try:
+                stream = await self.client.chat.completions.create(**params)
+            except Exception as e:
+                # Server rejected an option it doesn't know — retry without.
+                if "stream_options" in str(e):
+                    params.pop("stream_options", None)
+                    stream = await self.client.chat.completions.create(**params)
+                else:
+                    raise
 
             async for chunk in stream:
                 yield {
                     "id": chunk.id,
                     "model": chunk.model,
+                    "usage": self._usage_dict(getattr(chunk, "usage", None)),
                     "choices": [
                         {
                             "delta": {
@@ -344,8 +388,13 @@ class OpenAICompatibleProvider(Provider):
         content_parts: List[str] = []
         tool_acc: Dict[int, Dict[str, Any]] = {}
         finish_reason = None
+        final_usage: Optional[Dict[str, Any]] = None
 
         async for chunk in self.stream_chat(messages, model, tools=tools, **kwargs):
+            # The usage chunk (stream_options.include_usage) arrives with an
+            # EMPTY choices list — read it before the choices early-continue.
+            if chunk.get("usage"):
+                final_usage = chunk["usage"]
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -383,7 +432,7 @@ class OpenAICompatibleProvider(Provider):
             structured_tool_calls=structured,
             finish_reason=finish_reason or "stop",
         )
-        return {"id": "stream", "model": model, "choices": [built], "usage": None}
+        return {"id": "stream", "model": model, "choices": [built], "usage": final_usage}
 
     async def list_models(self) -> List[str]:
         """List available models."""

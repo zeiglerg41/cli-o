@@ -23,7 +23,8 @@ class FakeAgent:
 def render(messages):
     repl = object.__new__(ClioREPL)
     buf = io.StringIO()
-    repl.console = Console(file=buf, highlight=False, width=200)
+    # force_terminal=False: immune to FORCE_COLOR in the invoking shell
+    repl.console = Console(file=buf, highlight=False, width=200, force_terminal=False)
     repl.username = "gare"
     repl.agent = FakeAgent(messages)
     repl._print_resume_transcript()

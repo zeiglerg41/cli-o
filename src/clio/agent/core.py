@@ -538,41 +538,6 @@ class Agent:
         except Exception as e:
             self.session_logger.logger.error(f"Failed to save message with RAG: {e}")
 
-    def _calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
-        """Calculate cost in USD for a model request.
-
-        Args:
-            model: Model name
-            prompt_tokens: Input tokens
-            completion_tokens: Output tokens
-
-        Returns:
-            Cost in USD
-        """
-        # Find pricing for this model (check for exact match or prefix)
-        pricing = None
-        model_lower = model.lower()
-
-        # Try exact match first
-        if model_lower in self.MODEL_PRICING:
-            pricing = self.MODEL_PRICING[model_lower]
-        else:
-            # Try prefix match (e.g., "gpt-4o-2024-05-13" matches "gpt-4o")
-            for model_prefix, model_pricing in self.MODEL_PRICING.items():
-                if model_lower.startswith(model_prefix):
-                    pricing = model_pricing
-                    break
-
-        if not pricing:
-            # Unknown model - return 0 cost
-            return 0.0
-
-        # Calculate cost (prices are per 1M tokens)
-        input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
-        output_cost = (completion_tokens / 1_000_000) * pricing["output"]
-
-        return input_cost + output_cost
-
     async def compact(self, force: bool = False) -> str:
         """Distill older history into a state snapshot, keeping the recent tail.
 
@@ -983,11 +948,16 @@ class Agent:
                 if prompt_tokens:
                     self.last_prompt_tokens = prompt_tokens
 
-                # Calculate cost
-                cost_usd = self._calculate_cost(
-                    self.current_model,
-                    prompt_tokens,
-                    completion_tokens
+                # Resolve cost: billed > live pricing > static estimate > unknown
+                from ..providers.pricing import get_live_pricing, is_local_endpoint, resolve_cost
+                provider_config = self._provider_config()
+                base_url = provider_config.baseURL if provider_config else None
+                live = await get_live_pricing(base_url)
+                cost_info = resolve_cost(
+                    self.current_model, prompt_tokens, completion_tokens,
+                    response_usage=usage, live_pricing=live,
+                    static_pricing=self.MODEL_PRICING,
+                    is_local=is_local_endpoint(base_url),
                 )
 
                 # Store in database
@@ -997,7 +967,8 @@ class Agent:
                     provider=self.current_provider_name,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
-                    cost_usd=cost_usd
+                    cost_usd=cost_info.cost_usd,
+                    cost_source=cost_info.source,
                 )
 
             # Add assistant message

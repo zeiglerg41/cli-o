@@ -186,6 +186,7 @@ class ClioREPL:
         r.register("/remove", self._cmd_remove, "Remove a file from context: /remove <path>")
         r.register("/clear", self._cmd_clear, "Clear conversation history")
         r.register("/compact", self._cmd_compact, "Summarize older history to free context")
+        r.register("/usage", self._cmd_usage, "Show this month's token usage and spend")
         r.register("/config", self._cmd_config, "Show config file path")
         r.register("/exit", self._cmd_exit, "Exit clio")
         r.register("/quit", self._cmd_exit, "Exit clio")
@@ -449,6 +450,62 @@ class ClioREPL:
 
     async def _cmd_compact(self, args: str) -> str:
         return await self.agent.compact(force=True)
+
+    async def _cmd_usage(self, args: str) -> str:
+        """Month-to-date spend from the local ledger, plus authoritative
+        account totals from providers that expose a free endpoint."""
+        from datetime import datetime
+
+        db = self.agent.history_db
+        month_rows = db.get_monthly_usage()
+        today = db.get_today_usage()
+
+        lines = [f"[bold]Usage — {datetime.now().strftime('%B %Y')}[/bold]"]
+        if not month_rows:
+            lines.append("  no usage recorded this month")
+        total_cost = 0.0
+        any_estimates = False
+        for r in month_rows:
+            total_cost += r["total_cost"]
+            marker = "~" if r["has_estimates"] else ""
+            note = f" [dim]({r['unknown_rows']} unpriced calls)[/dim]" if r["unknown_rows"] else ""
+            lines.append(
+                f"  {r['provider']}/{r['model']}: "
+                f"{r['prompt_tokens']:,} in + {r['completion_tokens']:,} out"
+                f" = {marker}${r['total_cost']:.4f}{note}"
+            )
+            any_estimates = any_estimates or r["has_estimates"]
+        lines.append(f"  [bold]month total: {'~' if any_estimates else ''}${total_cost:.4f}[/bold]")
+        lines.append(
+            f"  today: {today['prompt_tokens']:,} in + "
+            f"{today['completion_tokens']:,} out = ${today['total_cost']:.4f}"
+        )
+        if any_estimates:
+            lines.append("  [dim]~ = includes estimated/unpriced rows (not provider-billed)[/dim]")
+
+        # Authoritative account totals where a free endpoint exists
+        config = self.config_manager.load()
+        orc = config.providers.get("openrouter")
+        if orc and orc.apiKey and not orc.apiKey.startswith("PASTE"):
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.get(
+                        "https://openrouter.ai/api/v1/credits",
+                        headers={"Authorization": f"Bearer {orc.apiKey}"},
+                    )
+                    if resp.status_code == 200:
+                        d = resp.json()["data"]
+                        lines.append(
+                            f"  OpenRouter account (authoritative, lifetime): "
+                            f"${d.get('total_usage', 0):.4f} used of "
+                            f"${d.get('total_credits', 0):.2f} credits"
+                        )
+            except Exception:
+                lines.append("  [dim]OpenRouter account check unavailable[/dim]")
+        if "anthropic" in config.providers:
+            lines.append("  [dim]Anthropic billing: console.anthropic.com (no per-key spend API)[/dim]")
+        return "\n".join(lines)
 
     def _cmd_config(self, args: str) -> str:
         return f"Config file: {self.config_manager.config_path}"

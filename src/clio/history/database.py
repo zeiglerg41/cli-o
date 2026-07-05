@@ -89,6 +89,7 @@ class HistoryDatabase:
         except sqlite3.OperationalError:
             pass
 
+
         # Usage stats table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS usage_stats (
@@ -101,9 +102,21 @@ class HistoryDatabase:
                 completion_tokens INTEGER NOT NULL,
                 total_tokens INTEGER NOT NULL,
                 cost_usd REAL NOT NULL,
+                cost_source TEXT DEFAULT 'estimate',
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             )
         """)
+
+        # Migrate pre-existing databases: how each usage row's cost was
+        # determined (billed / computed / estimate / unknown). Must run AFTER
+        # the CREATE TABLE above.
+        try:
+            cursor.execute(
+                "ALTER TABLE usage_stats ADD COLUMN cost_source TEXT DEFAULT 'estimate'"
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
         # Create indexes
         cursor.execute("""
@@ -470,7 +483,8 @@ class HistoryDatabase:
         provider: str,
         prompt_tokens: int,
         completion_tokens: int,
-        cost_usd: float
+        cost_usd: float,
+        cost_source: str = "estimate",
     ) -> None:
         """Add usage statistics for a single API call.
 
@@ -481,6 +495,9 @@ class HistoryDatabase:
             prompt_tokens: Input tokens
             completion_tokens: Output tokens
             cost_usd: Cost in USD
+            cost_source: How the cost was determined —
+                "billed" (provider-reported), "computed" (live pricing),
+                "estimate" (static table), or "unknown" (unpriceable)
         """
         cursor = self.conn.cursor()
         timestamp = datetime.now().isoformat()
@@ -489,10 +506,12 @@ class HistoryDatabase:
         cursor.execute("""
             INSERT INTO usage_stats (
                 conversation_id, timestamp, model, provider,
-                prompt_tokens, completion_tokens, total_tokens, cost_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                prompt_tokens, completion_tokens, total_tokens, cost_usd,
+                cost_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (conversation_id, timestamp, model, provider,
-              prompt_tokens, completion_tokens, total_tokens, cost_usd))
+              prompt_tokens, completion_tokens, total_tokens, cost_usd,
+              cost_source))
 
         self.conn.commit()
 
@@ -577,23 +596,31 @@ class HistoryDatabase:
 
         cursor.execute("""
             SELECT
+                provider,
                 model,
                 SUM(prompt_tokens) as prompt_tokens,
                 SUM(completion_tokens) as completion_tokens,
-                SUM(cost_usd) as total_cost
+                SUM(cost_usd) as total_cost,
+                MAX(CASE WHEN cost_source IN ('estimate', 'unknown')
+                    THEN 1 ELSE 0 END) as has_estimates,
+                SUM(CASE WHEN cost_source = 'unknown' THEN 1 ELSE 0 END)
+                    as unknown_rows
             FROM usage_stats
             WHERE timestamp >= ? AND timestamp < ?
-            GROUP BY model
+            GROUP BY provider, model
             ORDER BY total_cost DESC
         """, (start_date, end_date))
 
         results = []
         for row in cursor.fetchall():
             results.append({
+                'provider': row['provider'],
                 'model': row['model'],
                 'prompt_tokens': row['prompt_tokens'] or 0,
                 'completion_tokens': row['completion_tokens'] or 0,
-                'total_cost': row['total_cost'] or 0.0
+                'total_cost': row['total_cost'] or 0.0,
+                'has_estimates': bool(row['has_estimates']),
+                'unknown_rows': row['unknown_rows'] or 0,
             })
 
         return results
