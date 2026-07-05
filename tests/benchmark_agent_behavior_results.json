@@ -1,0 +1,173 @@
+{
+  "qwen3-coder-unsloth:30b": [
+    {
+      "task": "git-remote-state",
+      "success": true,
+      "seconds": 46.6,
+      "stall_nudges": 1,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 7,
+      "error": null,
+      "answer_head": "Based on the information I've gathered, I can tell you about the latest commits in the current \"feature/project-memory\" branch:\n\nThe latest commits pushed to th"
+    },
+    {
+      "task": "code-lookup",
+      "success": false,
+      "seconds": 30.1,
+      "stall_nudges": 2,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 7,
+      "error": null,
+      "answer_head": "Let's look at the agent directory since that's likely where the system prompt is defined:"
+    },
+    {
+      "task": "capability-selfknowledge",
+      "success": false,
+      "seconds": 9.2,
+      "stall_nudges": 1,
+      "inability_nudges": 1,
+      "recovered_tool_calls": 0,
+      "tool_calls": 5,
+      "error": null,
+      "answer_head": "Looking at the project structure, I can see this is a Git repository with a `.git/` directory. Since I'm unable to execute git commands directly due to permissi"
+    },
+    {
+      "task": "tool-inventory",
+      "success": true,
+      "seconds": 6.0,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 2,
+      "error": null,
+      "answer_head": "Based on the code in `src/clio/agent/tools.py`, I can see the following tools that are exposed to the model:\n\n1. read_file - Read the contents of a file\n2. writ"
+    },
+    {
+      "task": "file-creation",
+      "success": true,
+      "seconds": 1.0,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 1,
+      "error": null,
+      "answer_head": "Created the file /tmp/clio-bench-6u6227eb/hello_bench.txt with the content \"benchmark ok\"."
+    }
+  ],
+  "devstral-small-2:24b": [
+    {
+      "task": "git-remote-state",
+      "success": false,
+      "seconds": 37.6,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 3,
+      "error": null,
+      "answer_head": "The latest changes pushed to the remote repo (origin/main) are:\n\n- Various UI/CLI improvements, permission fixes, response streaming, and command safety feature"
+    },
+    {
+      "task": "code-lookup",
+      "success": true,
+      "seconds": 1.9,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 1,
+      "error": null,
+      "answer_head": "The agent's default system prompt is stored in the file `src/clio/agent/constants.py` in the variable `DEFAULT_SYSTEM_PROMPT`."
+    },
+    {
+      "task": "capability-selfknowledge",
+      "success": true,
+      "seconds": 6.9,
+      "stall_nudges": 2,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 0,
+      "error": null,
+      "answer_head": "I have enough information. The answer is: Yes, I can run `git commit` and `git push` for you if you ask. I will show a confirmation prompt before pushing."
+    },
+    {
+      "task": "tool-inventory",
+      "success": false,
+      "seconds": 300.1,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 2,
+      "error": "timeout",
+      "answer_head": ""
+    },
+    {
+      "task": "file-creation",
+      "success": true,
+      "seconds": 3.2,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 1,
+      "error": null,
+      "answer_head": "Done"
+    }
+  ],
+  "qwen3:30b-a3b": [
+    {
+      "task": "git-remote-state",
+      "success": false,
+      "seconds": 49.3,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 2,
+      "error": null,
+      "answer_head": "All commits on branch `feature/project-memory` are already pushed to the remote repository. The command `git log origin/feature/project-memory..HEAD` returned n"
+    },
+    {
+      "task": "code-lookup",
+      "success": true,
+      "seconds": 8.0,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 1,
+      "error": null,
+      "answer_head": "The default system prompt is defined in `src/clio/agent/constants.py` as the variable `DEFAULT_SYSTEM_PROMPT`."
+    },
+    {
+      "task": "capability-selfknowledge",
+      "success": true,
+      "seconds": 24.8,
+      "stall_nudges": 2,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 0,
+      "error": null,
+      "answer_head": "Yes. I'll use `execute_bash` to run the exact `git commit` and `git push` commands with parameters (like commit message) provided in your request. No confirmati"
+    },
+    {
+      "task": "tool-inventory",
+      "success": true,
+      "seconds": 19.7,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 2,
+      "error": null,
+      "answer_head": "read_file, write_file, edit_file, execute_bash, list_directory, grep_files, find_files, web_search, web_fetch, update_plan"
+    },
+    {
+      "task": "file-creation",
+      "success": true,
+      "seconds": 26.4,
+      "stall_nudges": 0,
+      "inability_nudges": 0,
+      "recovered_tool_calls": 0,
+      "tool_calls": 2,
+      "error": null,
+      "answer_head": "File created at /tmp/clio-bench-6u6227eb/hello_bench.txt with content \"benchmark ok\""
+    }
+  ]
+}
