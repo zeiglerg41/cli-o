@@ -35,8 +35,11 @@ AI coding assistant (a privately-owned alternative to Claude Code). Follow these
    state-snapshot pattern adapted from Apache-2.0 Gemini CLI / Codex CLI)
 3. ✅ Task/todo tracking (`update_plan` tool, Codex CLI schema; plan re-injected
    into the system prompt each turn)
-4. Sub-agents + parallel tool execution  ← NEXT
-5. Extensibility: MCP client, hooks/plugins
+4. ✅ Sub-agents (`agent/subagent.py`: dispatch_agent tool — isolated context,
+   read-only toolset, turn/time caps, no recursion; usage forwarded to the
+   parent ledger. Parallelism deliberately skipped: single-GPU serialization
+   makes context isolation the real win.)
+5. Extensibility: MCP client, hooks/plugins  ← NEXT
 
 ## Shipped hardening (2026-07-04)
 - Persistent context meter: prompt_toolkit bottom toolbar showing used/window

@@ -170,6 +170,10 @@ class Agent:
         self._context_window_cache: Dict[str, int] = {}
         # Dynamic tool-support cache: provider/model -> ToolSupport
         self._tool_support_cache: Dict[str, Any] = {}
+        # Sub-agent dispatch: top-level agents may delegate research tasks;
+        # sub-agents themselves may not (no recursion).
+        self.allow_subagents = True
+        self.max_turns = 20  # per-chat agentic loop cap
         self.tool_callback = tool_callback
         self.token_callback = token_callback
 
@@ -762,8 +766,11 @@ class Agent:
                     continue  # Skip orphaned tool message
             messages.append(msg)
 
-        # Get tool definitions
+        # Get tool definitions (+ sub-agent dispatch for top-level agents)
         tools = self.tools.get_tool_definitions()
+        if getattr(self, "allow_subagents", False):
+            from .subagent import DISPATCH_AGENT_DEFINITION
+            tools = tools + [DISPATCH_AGENT_DEFINITION]
 
         # Check if model supports tool calling (dynamic: Ollama capability
         # list > Anthropic Models API > static matrix > assume-supported).
@@ -792,7 +799,7 @@ class Agent:
 
         # Agentic loop: Turn = one LLM call + all tool executions
         # Following OpenAI Agents SDK, Claude Code, and LangChain patterns
-        max_turns = 20  # Industry standard: 15-20 turns for most tasks
+        max_turns = getattr(self, "max_turns", 20)  # sub-agents run a tighter cap
         turn = 0
         rate_limit_retries = 0  # Track 429-specific retries
         MAX_RATE_LIMIT_RETRIES = 5  # Max retries for rate limit errors
@@ -1104,8 +1111,15 @@ class Agent:
                     # Log tool call
                     self.session_logger.log_tool_call(tool_name, arguments)
 
-                    # Execute tool
-                    result = await self.tools.execute_tool(tool_name, arguments)
+                    # Execute tool (dispatch_agent is agent-level, not a Tools method)
+                    if tool_name == "dispatch_agent":
+                        if getattr(self, "allow_subagents", False):
+                            from .subagent import run_subagent
+                            result = await run_subagent(self, arguments.get("task", ""))
+                        else:
+                            result = "Error: sub-agents cannot dispatch sub-agents"
+                    else:
+                        result = await self.tools.execute_tool(tool_name, arguments)
 
                     # Persist plan updates so resumed conversations restore them
                     if tool_name == "update_plan" and self.tools.current_plan:

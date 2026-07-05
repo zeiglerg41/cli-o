@@ -27,11 +27,19 @@ class Tools:
     def __init__(
         self,
         permission_callback: Optional[Callable[[str, str, Optional[dict]], Awaitable[bool]]] = None,
-        vscode_protocol: Optional[Any] = None
+        vscode_protocol: Optional[Any] = None,
+        allowed_tools: Optional[set] = None,
     ):
-        """Initialize tools."""
+        """Initialize tools.
+
+        Args:
+            allowed_tools: If set, only these tool names are exposed in
+                get_tool_definitions() and executable — used to give
+                sub-agents a restricted (read-only) toolset.
+        """
         self.permission_callback = permission_callback
         self.vscode_protocol = vscode_protocol
+        self.allowed_tools = allowed_tools
         # Track pending edits for batching highlights
         self.pending_highlights = {}  # file_path -> list of edit ranges
         # Batching state
@@ -600,7 +608,13 @@ CRITICAL GROUNDING RULES:
         return f"Plan updated:\n{self.render_plan()}"
 
     def get_tool_definitions(self) -> list[dict]:
-        """Get OpenAI function definitions for tools."""
+        """Get OpenAI function definitions for tools (filtered by allowed_tools)."""
+        defs = self._all_tool_definitions()
+        if self.allowed_tools is None:
+            return defs
+        return [d for d in defs if d["function"]["name"] in self.allowed_tools]
+
+    def _all_tool_definitions(self) -> list[dict]:
         return [
             {
                 "type": "function",
@@ -847,6 +861,8 @@ CRITICAL GROUNDING RULES:
 
     async def execute_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool by name."""
+        if self.allowed_tools is not None and tool_name not in self.allowed_tools:
+            return f"Error: tool '{tool_name}' is not available in this context"
         if tool_name == "read_file":
             return await self.read_file(**arguments)
         elif tool_name == "write_file":
