@@ -406,14 +406,24 @@ class ClioREPL:
         parts = args.split()
         if len(parts) == 2:
             provider, model = parts
-            try:
-                await self.agent.switch_model(provider, model)
-                # New model: window unknown until its first response resolves it.
-                self._ctx_window = None
-                return f"Switched to [green]{model}[/green] @ {provider}"
-            except ValueError as e:
-                return f"[red]{e}[/red]"
-        # List available
+            return await self._switch_and_report(provider, model)
+
+        # No args: interactive arrow-key picker (falls back to a text list when
+        # not attached to a terminal).
+        options = []
+        for name, pcfg in config.providers.items():
+            for m in pcfg.models:
+                options.append((name, m))
+        if not options:
+            return "[yellow]No models configured.[/yellow]"
+
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            picked = await self._pick_model_interactive(options)
+            if picked is None:
+                return "[dim]Model unchanged.[/dim]"
+            return await self._switch_and_report(*picked)
+
+        # Non-interactive fallback: the original text listing
         lines = [f"Current: [green]{self.agent.current_model}[/green] @ {self.agent.current_provider_name}", ""]
         for name, pcfg in config.providers.items():
             host = pcfg.hostname or pcfg.baseURL or name
@@ -423,6 +433,76 @@ class ClioREPL:
         lines.append("")
         lines.append("[dim]Switch with: /model <provider> <model>[/dim]")
         return "\n".join(lines)
+
+    async def _switch_and_report(self, provider: str, model: str) -> str:
+        try:
+            await self.agent.switch_model(provider, model)
+            # New model: window unknown until its first response resolves it.
+            self._ctx_window = None
+            return f"Switched to [green]{model}[/green] @ {provider}"
+        except ValueError as e:
+            return f"[red]{e}[/red]"
+
+    async def _pick_model_interactive(self, options):
+        """Inline up/down + Enter model picker. Returns (provider, model) or
+        None if cancelled. Not full-screen — renders in place, preserving
+        scrollback like the rest of the line-based UI."""
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import Layout, HSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.styles import Style
+
+        # Start on the current model if it's in the list.
+        cur = (self.agent.current_provider_name, self.agent.current_model)
+        sel = [options.index(cur)] if cur in options else [0]
+
+        def render():
+            frags = [("class:title", "Select a model  (↑/↓ move · Enter select · Esc cancel)\n\n")]
+            for i, (prov, model) in enumerate(options):
+                chosen = i == sel[0]
+                marker = "❯ " if chosen else "  "
+                live = "  ● current" if (prov, model) == cur else ""
+                style = "class:sel" if chosen else "class:opt"
+                frags.append((style, f"{marker}{prov} / {model}{live}\n"))
+            return frags
+
+        kb = KeyBindings()
+
+        @kb.add("up")
+        @kb.add("c-p")
+        @kb.add("k")
+        def _(event):
+            sel[0] = (sel[0] - 1) % len(options)
+
+        @kb.add("down")
+        @kb.add("c-n")
+        @kb.add("j")
+        def _(event):
+            sel[0] = (sel[0] + 1) % len(options)
+
+        @kb.add("enter")
+        def _(event):
+            event.app.exit(result=options[sel[0]])
+
+        @kb.add("c-c")
+        @kb.add("escape")
+        @kb.add("q")
+        def _(event):
+            event.app.exit(result=None)
+
+        app = Application(
+            layout=Layout(HSplit([Window(FormattedTextControl(render), height=len(options) + 2)])),
+            key_bindings=kb,
+            style=Style.from_dict({
+                "title": "bold",
+                "sel": "reverse",
+                "opt": "",
+            }),
+            full_screen=False,
+            erase_when_done=True,
+        )
+        return await app.run_async()
 
     def _cmd_files(self, args: str) -> str:
         files = self.context_manager.list_files()
