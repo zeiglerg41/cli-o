@@ -51,3 +51,22 @@ AI coding assistant (a privately-owned alternative to Claude Code). Follow these
   through the normal permission path (`agent/tool_call_recovery.py`).
 - Git workflow recipes in the system prompt (ls-remote for pushed state,
   newest-first log order, destructive-command prohibition).
+- Dynamic model capabilities (`providers/model_catalog.py`): tool support from
+  Ollama /api/show or the Anthropic Models API; allow-by-default with runtime
+  downgrade. Static matrix is offline fallback only.
+- Usage/spend tracking (`providers/pricing.py`, `/usage`): per-request cost
+  tagged billed/computed/estimate/local/unknown; OpenRouter billed cost and
+  account totals verified live.
+
+## Known follow-ups (observed 2026-07-05, not yet built)
+- 429 retry loop looks like a hang: spinner should show "rate-limited,
+  retrying n/5" (observed live on OpenRouter free-tier congestion).
+- Suspected retry stacking: session log showed 30-60s gaps between clio's
+  retry attempts despite 2-17s logged waits — strongest candidate is the
+  OpenAI SDK's internal retries multiplying clio's. Not yet investigated.
+- Config schema accepts both `apiKey` and `api_key` spellings; a stale
+  duplicate field caused confusion once. Normalize to one spelling.
+- README points at `~/.claude-clone/config.json`; real path is
+  `~/.clio/config.json`.
+- `/model` switch silently persists as the cold-start default — decide
+  whether that's wanted (a metered model can become the default unnoticed).
