@@ -859,29 +859,46 @@ CRITICAL GROUNDING RULES:
             }
         ]
 
+    _TOOL_METHODS = {
+        "read_file", "write_file", "edit_file", "execute_bash", "list_directory",
+        "grep_files", "find_files", "web_search", "web_fetch", "update_plan",
+    }
+
     async def execute_tool(self, tool_name: str, arguments: dict) -> str:
-        """Execute a tool by name."""
+        """Execute a tool by name.
+
+        Argument mismatches (a model hallucinating an extra param like
+        read_file(offset=...), or omitting a required one) are returned as
+        instructive error strings so the agent loop can recover — never
+        raised, which would kill the whole turn.
+        """
         if self.allowed_tools is not None and tool_name not in self.allowed_tools:
             return f"Error: tool '{tool_name}' is not available in this context"
-        if tool_name == "read_file":
-            return await self.read_file(**arguments)
-        elif tool_name == "write_file":
-            return await self.write_file(**arguments)
-        elif tool_name == "edit_file":
-            return await self.edit_file(**arguments)
-        elif tool_name == "execute_bash":
-            return await self.execute_bash(**arguments)
-        elif tool_name == "list_directory":
-            return await self.list_directory(**arguments)
-        elif tool_name == "grep_files":
-            return await self.grep_files(**arguments)
-        elif tool_name == "find_files":
-            return await self.find_files(**arguments)
-        elif tool_name == "web_search":
-            return await self.web_search(**arguments)
-        elif tool_name == "web_fetch":
-            return await self.web_fetch(**arguments)
-        elif tool_name == "update_plan":
-            return await self.update_plan(**arguments)
-        else:
+        if tool_name not in self._TOOL_METHODS:
             return f"Error: Unknown tool: {tool_name}"
+        if not isinstance(arguments, dict):
+            return f"Error: tool '{tool_name}' arguments must be an object"
+
+        method = getattr(self, tool_name)
+        import inspect
+        sig = inspect.signature(method)
+        accepted = set(sig.parameters)
+        unexpected = set(arguments) - accepted
+        if unexpected:
+            valid = ", ".join(sorted(accepted)) or "(none)"
+            return (
+                f"Error: tool '{tool_name}' does not accept "
+                f"{', '.join(sorted(unexpected))}. Valid parameters: {valid}"
+            )
+        missing = [
+            n for n, p in sig.parameters.items()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+            and n not in arguments
+        ]
+        if missing:
+            return f"Error: tool '{tool_name}' is missing required parameter(s): {', '.join(missing)}"
+        try:
+            return await method(**arguments)
+        except Exception as e:
+            return f"Error executing {tool_name}: {e}"
